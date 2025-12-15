@@ -37,17 +37,10 @@ EXPOSE 5900
 
 # Create startup script
 RUN echo '#!/bin/bash\n\
-# Start Xvfb
-Xvfb :1 -screen 0 1024x768x16 &
-
-# Start VNC server
-x11vnc -create -forever -nopw -display :1 &
-
-# Start the application
-python3 /app/web_interface.py &
-
-# Keep container running
-tail -f /dev/null' > /startup.sh && \
+# Start Xvfb\nXvfb :1 -screen 0 1024x768x16 &\n\
+# Start VNC server\nx11vnc -create -forever -nopw -display :1 &\n\
+# Start the application\npython3 /app/web_interface.py &\n\
+# Keep container running\ntail -f /dev/null' > /startup.sh && \
     chmod +x /startup.sh
 
 # Set the entrypoint
