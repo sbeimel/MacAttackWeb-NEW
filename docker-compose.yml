@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  macattack:
+    build: .
+    container_name: macattack
+    restart: unless-stopped
+    ports:
+      - "5000:5000"  # Web interface
+      - "5900:5900"  # VNC for debugging (optional)
+    volumes:
+      - ./config:/root/.config/vlc  # Persist VLC configuration
+    environment:
+      - DISPLAY=:1
+      - VLC_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/vlc/plugins
+    cap_add:
+      - SYS_ADMIN  # Required for Xvfb
+    devices:
+      - /dev/dri:/dev/dri  # For hardware acceleration (if available)
+    shm_size: '2gb'  # Increase shared memory for Xvfb
+    tty: true  # Keep container running
