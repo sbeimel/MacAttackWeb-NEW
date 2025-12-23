@@ -87,6 +87,7 @@ defaultSettings = {
     "output_format": "mac_only",
     "auto_save": True,
     "max_proxy_errors": 5,
+    "proxy_test_threads": 50,
 }
 
 # Default proxy sources
@@ -1125,7 +1126,8 @@ def test_proxies_worker():
     
     working = []
     failed = []
-    add_log(proxy_state, f"Testing {len(proxies)} proxies...", "info")
+    test_threads = get_settings().get("proxy_test_threads", 50)
+    add_log(proxy_state, f"Testing {len(proxies)} proxies with {test_threads} threads...", "info")
     
     def test_proxy(proxy):
         try:
@@ -1142,7 +1144,7 @@ def test_proxies_worker():
             pass
         return proxy, False
     
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    with ThreadPoolExecutor(max_workers=test_threads) as executor:
         futures = {executor.submit(test_proxy, p): p for p in proxies}
         
         for future in as_completed(futures):
@@ -1178,7 +1180,8 @@ def test_proxies_autodetect_worker():
     
     result_proxies = []
     failed = []
-    add_log(proxy_state, f"Testing {len(proxies)} proxies with auto-detection (HTTP → SOCKS5 → SOCKS4)...", "info")
+    test_threads = get_settings().get("proxy_test_threads", 50)
+    add_log(proxy_state, f"Testing {len(proxies)} proxies with {test_threads} threads (HTTP → SOCKS5 → SOCKS4)...", "info")
     
     def test_proxy_autodetect(proxy):
         # Extract base ip:port and auth (remove any existing prefix)
@@ -1231,7 +1234,7 @@ def test_proxies_autodetect_worker():
         
         return original_proxy, original_proxy, "NONE", False
     
-    with ThreadPoolExecutor(max_workers=50) as executor:
+    with ThreadPoolExecutor(max_workers=test_threads) as executor:
         futures = {executor.submit(test_proxy_autodetect, p): p for p in proxies}
         
         for future in as_completed(futures):

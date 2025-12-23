@@ -971,6 +971,15 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     alert('Settings saved!');
 });
 
+document.getElementById('btn-save-proxy-settings').addEventListener('click', async () => {
+    const settings = {
+        proxy_test_threads: parseInt(document.getElementById('setting-proxy-test-threads').value),
+        max_proxy_errors: parseInt(document.getElementById('setting-max-proxy-errors').value)
+    };
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+    alert('Proxy settings saved!');
+});
+
 (async () => {
     const res = await fetch('/api/settings');
     const s = await res.json();
@@ -979,6 +988,8 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     document.getElementById('setting-prefix').value = s.mac_prefix || '00:1A:79:';
     document.getElementById('setting-use-proxies').checked = s.use_proxies || false;
     document.getElementById('setting-auto-save').checked = s.auto_save !== false;
+    document.getElementById('setting-proxy-test-threads').value = s.proxy_test_threads || 50;
+    document.getElementById('setting-max-proxy-errors').value = s.max_proxy_errors || 5;
 })();
 
 // ============== AUTHENTICATION ==============

@@ -366,6 +366,23 @@
             </div>
 
             <div class="panel">
+                <h2>Proxy Settings</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Proxy Test Threads:</label>
+                        <input type="number" id="setting-proxy-test-threads" min="1" max="200" value="50">
+                        <small style="color: var(--text-secondary);">Used for "Test Proxies" and "Test & Auto-Detect"</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Max Proxy Errors:</label>
+                        <input type="number" id="setting-max-proxy-errors" min="1" max="20" value="5">
+                        <small style="color: var(--text-secondary);">Disable proxy after this many errors</small>
+                    </div>
+                </div>
+                <button id="btn-save-proxy-settings" class="btn btn-success">Save Proxy Settings</button>
+            </div>
+
+            <div class="panel">
                 <h2>Authentication</h2>
                 <div id="auth-status"></div>
                 <div class="form-row">
