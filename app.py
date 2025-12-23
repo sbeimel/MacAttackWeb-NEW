@@ -581,22 +581,30 @@ def run_attack(portal_id):
                         channels = result.get("channels", 0)
                         genres = result.get("genres", [])
                         
+                        # Check for DE channels in genres
+                        de_channels = [g for g in genres if g.upper().startswith("DE") or "GERMAN" in g.upper() or "DEUTSCH" in g.upper()]
+                        has_de = len(de_channels) > 0
+                        
                         state["found_macs"].append({
                             "mac": mac,
                             "expiry": expiry,
                             "channels": channels,
+                            "has_de": has_de,
                             "time": datetime.now().strftime("%H:%M:%S")
                         })
                         
-                        add_log(state, f"🎯 HIT! {mac} - Expiry: {expiry} - Channels: {channels}{proxy_info}", "success")
+                        de_info = " 🇩🇪" if has_de else ""
+                        add_log(state, f"🎯 HIT! {mac} - Expiry: {expiry} - Channels: {channels}{de_info}{proxy_info}", "success")
                         
-                        # Save to persistent storage
+                        # Save to persistent storage - check for duplicates (same MAC + Portal)
                         found_entry = {
                             "mac": mac,
                             "expiry": expiry,
                             "portal": portal_url,
                             "channels": channels,
                             "genres": genres,
+                            "has_de": has_de,
+                            "de_genres": de_channels,
                             "vod_categories": result.get("vod_categories", []),
                             "series_categories": result.get("series_categories", []),
                             "backend_url": result.get("backend_url"),
@@ -607,12 +615,25 @@ def run_attack(portal_id):
                             "client_ip": result.get("client_ip"),
                             "found_at": datetime.now().isoformat()
                         }
-                        config["found_macs"].append(found_entry)
-                        logger.info(f"Saved found MAC to config: {mac}")
+                        
+                        # Check if MAC+Portal already exists - update instead of append
+                        existing_idx = None
+                        for idx, existing in enumerate(config["found_macs"]):
+                            if existing.get("mac") == mac and existing.get("portal") == portal_url:
+                                existing_idx = idx
+                                break
+                        
+                        if existing_idx is not None:
+                            # Update existing entry
+                            config["found_macs"][existing_idx] = found_entry
+                            logger.info(f"Updated existing MAC in config: {mac}")
+                        else:
+                            # Add new entry
+                            config["found_macs"].append(found_entry)
+                            logger.info(f"Saved new MAC to config: {mac}")
                         
                         if settings.get("auto_save", True):
                             save_config()
-                            logger.info(f"Config saved with {len(config['found_macs'])} found MACs")
                     else:
                         add_log(state, f"✗ {mac} - No valid account{proxy_info}", "info")
                     

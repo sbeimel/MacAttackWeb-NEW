@@ -392,96 +392,113 @@ function playStream(url) {
     const status = document.getElementById('player-status');
     stopPlayer();
     panel.style.display = 'block';
-    status.textContent = 'Loading...';
+    status.textContent = 'Loading stream...';
+    
+    // Log the URL for debugging
+    console.log('Attempting to play:', url);
     
     // Check if HLS stream (.m3u8)
     if (url.includes('.m3u8') || url.includes('m3u8')) {
-        if (Hls.isSupported()) {
-            hls = new Hls({ 
-                debug: false, 
-                enableWorker: true,
-                lowLatencyMode: true,
-                backBufferLength: 90
-            });
-            hls.loadSource(url);
-            hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => { 
-                status.textContent = 'Playing (HLS)'; 
-                video.play().catch(e => status.textContent = 'Click to play'); 
-            });
-            hls.on(Hls.Events.ERROR, (e, d) => { 
-                if (d.fatal) {
-                    status.textContent = 'HLS Error - Try VLC';
-                    console.error('HLS Error:', d);
-                }
-            });
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            // Safari native HLS
-            video.src = url;
-            video.addEventListener('loadedmetadata', () => { 
-                status.textContent = 'Playing (Native HLS)'; 
-                video.play().catch(e => status.textContent = 'Click to play'); 
-            });
-        } else {
-            status.textContent = 'HLS not supported - Use VLC';
-        }
+        playHLS(video, url, status);
     } 
-    // Try MPEG-TS streams with HLS.js (some work)
-    else if (url.includes('.ts') || url.includes('/live/') || url.includes(':8080')) {
-        // Try HLS.js first for TS streams
-        if (Hls.isSupported()) {
-            hls = new Hls({ debug: false, enableWorker: true });
-            hls.loadSource(url);
-            hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => { 
-                status.textContent = 'Playing (TS/HLS)'; 
-                video.play().catch(e => status.textContent = 'Click to play'); 
-            });
-            hls.on(Hls.Events.ERROR, (e, d) => { 
-                if (d.fatal) {
-                    // Fallback to direct play
-                    stopPlayer();
-                    video.src = url;
-                    video.play().then(() => {
-                        status.textContent = 'Playing (Direct)';
-                    }).catch(() => {
-                        status.textContent = 'Format not supported - Use VLC';
-                    });
-                }
-            });
-        } else {
-            // Direct play attempt
-            video.src = url;
-            video.play().then(() => {
-                status.textContent = 'Playing';
-            }).catch(() => {
-                status.textContent = 'Format not supported - Use VLC';
-            });
-        }
+    // MPEG-TS streams - try HLS.js first, then direct
+    else if (url.includes('.ts') || url.includes('/live/') || url.includes('/ch/')) {
+        // Most IPTV streams are MPEG-TS which browsers can't play natively
+        // Try direct play first
+        video.src = url;
+        
+        video.oncanplay = () => {
+            status.textContent = 'Playing';
+            video.play().catch(() => status.textContent = 'Click video to play');
+        };
+        
+        video.onerror = () => {
+            console.log('Direct play failed, stream format not supported');
+            status.innerHTML = `
+                <span style="color: #ff6b6b;">⚠️ MPEG-TS format - Browser cannot play this stream</span><br>
+                <small>Use "Open in VLC" button or copy URL to VLC/media player</small>
+            `;
+        };
+        
+        // Set timeout for loading
+        setTimeout(() => {
+            if (video.readyState < 2) {
+                status.innerHTML = `
+                    <span style="color: #ffa500;">⏳ Stream loading slowly or format not supported</span><br>
+                    <small>Try "Open in VLC" for better compatibility</small>
+                `;
+            }
+        }, 5000);
     }
     // Standard video formats (mp4, webm, etc.)
     else {
         video.src = url;
-        video.addEventListener('canplay', () => { 
+        
+        video.oncanplay = () => { 
             status.textContent = 'Playing'; 
-            video.play().catch(e => status.textContent = 'Click video to play'); 
-        });
-        video.addEventListener('error', (e) => { 
+            video.play().catch(() => status.textContent = 'Click video to play'); 
+        };
+        
+        video.onerror = (e) => { 
             console.error('Video error:', e);
-            status.textContent = 'Format not supported in browser - Use VLC';
-        });
+            status.innerHTML = `
+                <span style="color: #ff6b6b;">❌ Cannot play this format in browser</span><br>
+                <small>Use "Open in VLC" button</small>
+            `;
+        };
     }
     
     // Click to play (for autoplay restrictions)
-    video.addEventListener('click', () => {
-        video.play().catch(() => {});
-    });
+    video.onclick = () => video.play().catch(() => {});
+}
+
+function playHLS(video, url, status) {
+    if (Hls.isSupported()) {
+        hls = new Hls({ 
+            debug: false, 
+            enableWorker: true,
+            lowLatencyMode: true,
+            backBufferLength: 90
+        });
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => { 
+            status.textContent = 'Playing (HLS)'; 
+            video.play().catch(() => status.textContent = 'Click to play'); 
+        });
+        hls.on(Hls.Events.ERROR, (e, d) => { 
+            if (d.fatal) {
+                status.innerHTML = `
+                    <span style="color: #ff6b6b;">HLS Error: ${d.type}</span><br>
+                    <small>Try "Open in VLC"</small>
+                `;
+                console.error('HLS Error:', d);
+            }
+        });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS
+        video.src = url;
+        video.onloadedmetadata = () => { 
+            status.textContent = 'Playing (Native HLS)'; 
+            video.play().catch(() => status.textContent = 'Click to play'); 
+        };
+    } else {
+        status.innerHTML = `
+            <span style="color: #ff6b6b;">HLS not supported</span><br>
+            <small>Use "Open in VLC"</small>
+        `;
+    }
 }
 
 function stopPlayer() {
     const video = document.getElementById('video-player');
     if (hls) { hls.destroy(); hls = null; }
-    video.pause(); video.src = ''; video.load();
+    video.pause(); 
+    video.src = ''; 
+    video.load();
+    video.oncanplay = null;
+    video.onerror = null;
+    video.onclick = null;
 }
 
 
@@ -617,6 +634,53 @@ document.getElementById('btn-save-proxies').addEventListener('click', async () =
     alert('Proxies saved!');
 });
 
+// Import proxies with auto-prefix
+document.getElementById('btn-import-proxies').addEventListener('click', async () => {
+    const importText = document.getElementById('proxy-import-textarea').value.trim();
+    if (!importText) { alert('Paste proxies to import'); return; }
+    
+    const proxyType = document.getElementById('proxy-import-type').value;
+    const lines = importText.split('\n').map(l => l.trim()).filter(l => l);
+    
+    const processedProxies = lines.map(proxy => {
+        // If already has a prefix, keep it
+        if (proxy.startsWith('socks4://') || proxy.startsWith('socks5://') || proxy.startsWith('http://')) {
+            return proxy;
+        }
+        // Apply selected type prefix
+        if (proxyType === 'socks4') {
+            return `socks4://${proxy}`;
+        } else if (proxyType === 'socks5') {
+            return `socks5://${proxy}`;
+        }
+        // HTTP = no prefix needed (default)
+        return proxy;
+    });
+    
+    // Get existing proxies and merge
+    const existingText = document.getElementById('proxy-list').value.trim();
+    const existingProxies = existingText ? existingText.split('\n').map(l => l.trim()).filter(l => l) : [];
+    
+    // Combine and remove duplicates
+    const allProxies = [...new Set([...existingProxies, ...processedProxies])];
+    
+    // Update textarea
+    document.getElementById('proxy-list').value = allProxies.join('\n');
+    document.getElementById('proxy-count').textContent = allProxies.length;
+    
+    // Clear import textarea
+    document.getElementById('proxy-import-textarea').value = '';
+    
+    // Save to backend
+    await fetch('/api/proxies', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ proxies: allProxies.join('\n') }) 
+    });
+    
+    alert(`Imported ${processedProxies.length} proxies (${proxyType.toUpperCase()}). Total: ${allProxies.length}`);
+});
+
 function startProxyPolling() {
     if (proxyInterval) clearInterval(proxyInterval);
     proxyInterval = setInterval(updateProxyStatus, 1000);
@@ -655,11 +719,22 @@ document.getElementById('btn-clear-found').addEventListener('click', async () =>
 async function loadFoundMacs() {
     const res = await fetch('/api/found');
     const data = await res.json();
-    document.getElementById('found-tbody').innerHTML = data.map(m => `
+    document.getElementById('found-tbody').innerHTML = data.map(m => {
+        // Check for DE channels
+        const hasDE = m.has_de || (m.genres || []).some(g => 
+            g.toUpperCase().startsWith('DE') || 
+            g.toUpperCase().includes('GERMAN') || 
+            g.toUpperCase().includes('DEUTSCH')
+        );
+        const deIcon = hasDE ? '✅' : '❌';
+        const deTitle = hasDE ? (m.de_genres || []).join(', ') || 'Has DE channels' : 'No DE channels';
+        
+        return `
         <tr>
             <td>${m.mac}</td>
             <td>${m.expiry || 'N/A'}</td>
             <td>${m.channels || 0}</td>
+            <td title="${deTitle}" style="text-align:center;font-size:1.2em">${deIcon}</td>
             <td>${m.portal || 'N/A'}</td>
             <td title="${(m.genres || []).join(', ')}">${(m.genres || []).length} genres</td>
             <td>${m.found_at ? new Date(m.found_at).toLocaleString() : 'N/A'}</td>
@@ -667,7 +742,7 @@ async function loadFoundMacs() {
                 <button class="btn btn-small btn-secondary btn-details" data-mac='${JSON.stringify(m).replace(/'/g, "&#39;")}'>Details</button>
             </td>
         </tr>
-    `).join('');
+    `}).join('');
     
     // Add click handlers for details buttons
     document.querySelectorAll('.btn-details').forEach(btn => {
@@ -683,6 +758,17 @@ function showMacDetails(mac) {
     details += `Portal: ${mac.portal || 'N/A'}\n`;
     details += `Expiry: ${mac.expiry || 'N/A'}\n`;
     details += `Channels: ${mac.channels || 0}\n`;
+    
+    // DE Channels info
+    const hasDE = mac.has_de || (mac.genres || []).some(g => 
+        g.toUpperCase().startsWith('DE') || 
+        g.toUpperCase().includes('GERMAN') || 
+        g.toUpperCase().includes('DEUTSCH')
+    );
+    details += `DE Channels: ${hasDE ? 'Yes ✅' : 'No ❌'}\n`;
+    if (mac.de_genres && mac.de_genres.length > 0) {
+        details += `DE Genres: ${mac.de_genres.join(', ')}\n`;
+    }
     
     if (mac.username && mac.password) {
         details += `\nCredentials:\n`;

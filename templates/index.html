@@ -260,6 +260,26 @@
                 <button id="btn-save-sources" class="btn btn-success">Save Sources</button>
             </div>
 
+            <div class="panel">
+                <h2>Import Proxies</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Default Proxy Type for ip:port format:</label>
+                        <select id="proxy-import-type">
+                            <option value="http">HTTP (default)</option>
+                            <option value="socks4">SOCKS4</option>
+                            <option value="socks5">SOCKS5</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="help-text">
+                    Paste proxies below (ip:port format). The selected type will be auto-applied.<br>
+                    Proxies with existing prefix (socks4://, socks5://) will keep their type.
+                </div>
+                <textarea id="proxy-import-textarea" placeholder="Paste proxies here (one per line)&#10;192.168.1.1:8080&#10;10.0.0.1:1080"></textarea>
+                <button id="btn-import-proxies" class="btn btn-success">Import & Add to List</button>
+            </div>
+
             <div class="two-columns">
                 <div class="panel">
                     <h2>Proxies (<span id="proxy-count">0</span>)</h2>
@@ -291,6 +311,7 @@
                             <th>MAC Address</th>
                             <th>Expiry</th>
                             <th>Channels</th>
+                            <th>DE</th>
                             <th>Portal</th>
                             <th>Genres</th>
                             <th>Found At</th>
