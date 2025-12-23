@@ -1,14 +1,13 @@
-// MacAttack-Web Frontend JavaScript
+// MacAttack-Web Frontend JavaScript v1.2
 
-// State
 let playerState = {
-    url: '',
-    mac: '',
-    token: '',
-    portal_type: '',
+    url: '', mac: '', token: '', token_random: '', portal_type: '',
     categories: { live: [], vod: [], series: [] },
     currentCategory: 'live'
 };
+
+let selectedAttackId = null;
+let attackInterval = null;
 
 // Tab Navigation
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -17,99 +16,196 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         btn.classList.add('active');
         document.getElementById(btn.dataset.tab).classList.add('active');
+        
+        if (btn.dataset.tab === 'portals') loadPortals();
+        if (btn.dataset.tab === 'maclist') loadMacList();
+        if (btn.dataset.tab === 'found') loadFoundMacs();
+        if (btn.dataset.tab === 'proxies') loadProxySources();
     });
 });
 
-// ============== ATTACK TAB ==============
+// ============== MULTI-PORTAL ATTACK ==============
 
-let attackInterval = null;
+async function loadPortalSelect() {
+    const res = await fetch('/api/portals');
+    const portals = await res.json();
+    const select = document.getElementById('attack-portal-select');
+    select.innerHTML = '<option value="">-- Select Portal --</option>';
+    portals.forEach(p => {
+        if (p.enabled) {
+            select.innerHTML += `<option value="${p.url}">${p.name}</option>`;
+        }
+    });
+}
 
+async function loadMacListCount() {
+    const res = await fetch('/api/maclist');
+    const data = await res.json();
+    document.getElementById('mac-list-count').textContent = data.count;
+}
+
+document.getElementById('attack-portal-select').addEventListener('change', (e) => {
+    if (e.target.value) document.getElementById('attack-url').value = e.target.value;
+});
+
+// Start single attack
 document.getElementById('btn-start').addEventListener('click', async () => {
     const url = document.getElementById('attack-url').value.trim();
-    if (!url) {
-        alert('Please enter a portal URL');
-        return;
-    }
+    const mode = document.querySelector('input[name="attack-mode"]:checked').value;
+    
+    if (!url) { alert('Please enter a portal URL'); return; }
     
     const res = await fetch('/api/attack/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({ url, mode })
     });
     const data = await res.json();
     
     if (data.success) {
-        document.getElementById('btn-start').disabled = true;
-        document.getElementById('btn-pause').disabled = false;
-        document.getElementById('btn-stop').disabled = false;
         startStatusPolling();
     } else {
         alert(data.error);
     }
 });
 
-document.getElementById('btn-pause').addEventListener('click', async () => {
-    const res = await fetch('/api/attack/pause', { method: 'POST' });
-    const data = await res.json();
-    document.getElementById('btn-pause').textContent = data.paused ? '▶ Resume' : '⏸ Pause';
+// Start multi-portal attack
+document.getElementById('btn-start-multi').addEventListener('click', async () => {
+    const res = await fetch('/api/portals');
+    const portals = await res.json();
+    const enabledUrls = portals.filter(p => p.enabled).map(p => p.url);
+    
+    if (enabledUrls.length === 0) {
+        alert('No enabled portals. Add portals in the Portals tab.');
+        return;
+    }
+    
+    const mode = document.querySelector('input[name="attack-mode"]:checked').value;
+    
+    const startRes = await fetch('/api/attack/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls: enabledUrls, mode })
+    });
+    const data = await startRes.json();
+    
+    if (data.success) {
+        startStatusPolling();
+    } else {
+        alert(data.error);
+    }
 });
 
-document.getElementById('btn-stop').addEventListener('click', async () => {
-    await fetch('/api/attack/stop', { method: 'POST' });
-    stopStatusPolling();
-    document.getElementById('btn-start').disabled = false;
-    document.getElementById('btn-pause').disabled = true;
-    document.getElementById('btn-stop').disabled = true;
-    document.getElementById('btn-pause').textContent = '⏸ Pause';
+// Stop all attacks
+document.getElementById('btn-stop-all').addEventListener('click', async () => {
+    await fetch('/api/attack/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+});
+
+// Clear finished
+document.getElementById('btn-clear-finished').addEventListener('click', async () => {
+    await fetch('/api/attack/clear', { method: 'POST' });
+    selectedAttackId = null;
+    document.getElementById('attack-details').style.display = 'none';
 });
 
 function startStatusPolling() {
-    attackInterval = setInterval(updateAttackStatus, 500);
+    if (attackInterval) clearInterval(attackInterval);
+    attackInterval = setInterval(updateAllAttacks, 500);
 }
 
-function stopStatusPolling() {
-    if (attackInterval) {
-        clearInterval(attackInterval);
-        attackInterval = null;
-    }
-}
-
-async function updateAttackStatus() {
+async function updateAllAttacks() {
     const res = await fetch('/api/attack/status');
     const data = await res.json();
     
-    document.getElementById('stat-tested').textContent = data.tested;
-    document.getElementById('stat-hits').textContent = data.hits;
-    document.getElementById('stat-errors').textContent = data.errors;
-    document.getElementById('current-mac').textContent = data.current_mac || '-';
+    const listDiv = document.getElementById('attacks-list');
     
-    // Format time
-    const mins = Math.floor(data.elapsed / 60);
-    const secs = data.elapsed % 60;
-    document.getElementById('stat-time').textContent = 
-        `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    if (!data.attacks || data.attacks.length === 0) {
+        listDiv.innerHTML = '<div class="no-attacks">No active attacks</div>';
+        document.getElementById('attack-details').style.display = 'none';
+        return;
+    }
     
-    // Update found list
+    listDiv.innerHTML = data.attacks.map(a => `
+        <div class="attack-item ${a.id === selectedAttackId ? 'selected' : ''} ${a.running ? '' : 'finished'}" data-id="${a.id}">
+            <div class="attack-info">
+                <span class="attack-url">${a.portal_url}</span>
+                <span class="attack-stats">Tested: ${a.tested} | Hits: ${a.hits} | ${a.running ? '🟢 Running' : '⚫ Stopped'}</span>
+            </div>
+            <div class="attack-actions">
+                ${a.running ? `<button class="btn btn-small btn-warning btn-pause-attack" data-id="${a.id}">${a.paused ? '▶' : '⏸'}</button>` : ''}
+                ${a.running ? `<button class="btn btn-small btn-danger btn-stop-attack" data-id="${a.id}">⏹</button>` : ''}
+            </div>
+        </div>
+    `).join('');
+    
+    // Click handlers
+    listDiv.querySelectorAll('.attack-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            if (!e.target.classList.contains('btn')) {
+                selectedAttackId = item.dataset.id;
+                updateSelectedAttack(data.attacks.find(a => a.id === selectedAttackId));
+            }
+        });
+    });
+    
+    listDiv.querySelectorAll('.btn-pause-attack').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            await fetch('/api/attack/pause', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: btn.dataset.id })
+            });
+        });
+    });
+    
+    listDiv.querySelectorAll('.btn-stop-attack').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            await fetch('/api/attack/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: btn.dataset.id })
+            });
+        });
+    });
+    
+    // Update selected attack details
+    if (selectedAttackId) {
+        const selected = data.attacks.find(a => a.id === selectedAttackId);
+        if (selected) updateSelectedAttack(selected);
+    }
+}
+
+function updateSelectedAttack(attack) {
+    if (!attack) return;
+    
+    document.getElementById('attack-details').style.display = 'block';
+    document.getElementById('stat-tested').textContent = attack.tested;
+    document.getElementById('stat-hits').textContent = attack.hits;
+    document.getElementById('stat-errors').textContent = attack.errors;
+    document.getElementById('current-portal').textContent = attack.portal_url;
+    document.getElementById('current-mac').textContent = attack.current_mac || '-';
+    document.getElementById('current-proxy').textContent = attack.current_proxy || 'None';
+    
+    const mins = Math.floor(attack.elapsed / 60);
+    const secs = attack.elapsed % 60;
+    document.getElementById('stat-time').textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    
     const foundList = document.getElementById('found-list');
-    foundList.innerHTML = data.found_macs.map(m => 
+    foundList.innerHTML = (attack.found_macs || []).map(m => 
         `<div class="log-entry success">${m.mac} - ${m.expiry}</div>`
     ).join('');
     foundList.scrollTop = foundList.scrollHeight;
     
-    // Update log
     const logBox = document.getElementById('attack-log');
-    logBox.innerHTML = data.logs.map(l => 
+    logBox.innerHTML = (attack.logs || []).map(l => 
         `<div class="log-entry ${l.level}"><span class="time">${l.time}</span>${l.message}</div>`
     ).join('');
     logBox.scrollTop = logBox.scrollHeight;
-    
-    if (!data.running) {
-        stopStatusPolling();
-        document.getElementById('btn-start').disabled = false;
-        document.getElementById('btn-pause').disabled = true;
-        document.getElementById('btn-stop').disabled = true;
-    }
 }
+
+loadPortalSelect();
+loadMacListCount();
+startStatusPolling();
 
 
 // ============== PLAYER TAB ==============
@@ -128,10 +224,7 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
     const mac = document.getElementById('player-mac').value.trim();
     const proxy = document.getElementById('player-proxy').value.trim();
     
-    if (!url || !mac) {
-        alert('Please enter URL and MAC address');
-        return;
-    }
+    if (!url || !mac) { alert('Please enter URL and MAC address'); return; }
     
     document.getElementById('btn-connect').textContent = 'Connecting...';
     document.getElementById('btn-connect').disabled = true;
@@ -145,13 +238,8 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
         const data = await res.json();
         
         if (data.success) {
-            playerState.url = url;
-            playerState.mac = mac;
-            playerState.token = data.token;
-            playerState.portal_type = data.portal_type;
-            playerState.categories.live = data.live;
-            playerState.categories.vod = data.vod;
-            playerState.categories.series = data.series;
+            playerState = { ...playerState, url, mac, token: data.token, token_random: data.token_random, portal_type: data.portal_type };
+            playerState.categories = { live: data.live, vod: data.vod, series: data.series };
             renderCategories();
         } else {
             alert('Connection failed: ' + data.error);
@@ -167,11 +255,7 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
 function renderCategories() {
     const list = document.getElementById('category-list');
     const cats = playerState.categories[playerState.currentCategory] || [];
-    
-    list.innerHTML = cats.map(c => 
-        `<div class="list-item" data-id="${c.id}" data-type="${playerState.currentCategory}">${c.name}</div>`
-    ).join('');
-    
+    list.innerHTML = cats.map(c => `<div class="list-item" data-id="${c.id}" data-type="${playerState.currentCategory}">${c.name}</div>`).join('');
     list.querySelectorAll('.list-item').forEach(item => {
         item.addEventListener('click', () => loadChannels(item.dataset.id, item.dataset.type));
     });
@@ -185,23 +269,16 @@ async function loadChannels(categoryId, categoryType) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            url: playerState.url,
-            mac: playerState.mac,
-            token: playerState.token,
-            portal_type: playerState.portal_type,
-            category_type: typeMap[categoryType],
-            category_id: categoryId,
-            proxy
+            url: playerState.url, mac: playerState.mac, token: playerState.token,
+            token_random: playerState.token_random, portal_type: playerState.portal_type,
+            category_type: typeMap[categoryType], category_id: categoryId, proxy
         })
     });
     const data = await res.json();
     
     if (data.success) {
         const list = document.getElementById('channel-list');
-        list.innerHTML = data.channels.map(ch => 
-            `<div class="list-item" data-cmd="${ch.cmd || ''}" data-type="${categoryType}">${ch.name}</div>`
-        ).join('');
-        
+        list.innerHTML = data.channels.map(ch => `<div class="list-item" data-cmd="${ch.cmd || ''}" data-type="${categoryType}">${ch.name}</div>`).join('');
         list.querySelectorAll('.list-item').forEach(item => {
             item.addEventListener('click', () => getStreamUrl(item.dataset.cmd, item.dataset.type));
         });
@@ -210,23 +287,17 @@ async function loadChannels(categoryId, categoryType) {
 
 async function getStreamUrl(cmd, contentType) {
     if (!cmd) return;
-    
     const proxy = document.getElementById('player-proxy').value.trim();
     const res = await fetch('/api/player/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-            url: playerState.url,
-            mac: playerState.mac,
-            token: playerState.token,
-            portal_type: playerState.portal_type,
-            cmd,
-            content_type: contentType === 'vod' ? 'vod' : 'live',
-            proxy
+            url: playerState.url, mac: playerState.mac, token: playerState.token,
+            token_random: playerState.token_random, portal_type: playerState.portal_type,
+            cmd, content_type: contentType === 'vod' ? 'vod' : 'live', proxy
         })
     });
     const data = await res.json();
-    
     if (data.success) {
         document.getElementById('stream-url').value = data.stream_url;
     } else {
@@ -243,9 +314,162 @@ document.getElementById('btn-copy-url').addEventListener('click', () => {
     }
 });
 
+// Video Player
+let hls = null;
+
+document.getElementById('btn-play').addEventListener('click', () => {
+    const url = document.getElementById('stream-url').value;
+    if (!url) { alert('No stream URL'); return; }
+    playStream(url);
+});
+
+document.getElementById('btn-close-player').addEventListener('click', () => {
+    stopPlayer();
+    document.getElementById('video-panel').style.display = 'none';
+});
+
+document.getElementById('btn-open-external').addEventListener('click', () => {
+    const url = document.getElementById('stream-url').value;
+    if (url) window.open(`vlc://${url}`, '_blank');
+});
+
+function playStream(url) {
+    const video = document.getElementById('video-player');
+    const panel = document.getElementById('video-panel');
+    const status = document.getElementById('player-status');
+    stopPlayer();
+    panel.style.display = 'block';
+    status.textContent = 'Loading...';
+    
+    if (url.includes('.m3u8')) {
+        if (Hls.isSupported()) {
+            hls = new Hls({ debug: false, enableWorker: true });
+            hls.loadSource(url);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'Playing (HLS)'; video.play(); });
+            hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) status.textContent = 'Error: ' + d.type; });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = url;
+            video.addEventListener('loadedmetadata', () => { status.textContent = 'Playing'; video.play(); });
+        }
+    } else {
+        video.src = url;
+        video.addEventListener('loadedmetadata', () => { status.textContent = 'Playing'; video.play(); });
+        video.addEventListener('error', () => { status.textContent = 'Error - Try VLC'; });
+    }
+}
+
+function stopPlayer() {
+    const video = document.getElementById('video-player');
+    if (hls) { hls.destroy(); hls = null; }
+    video.pause(); video.src = ''; video.load();
+}
+
+
+// ============== PORTALS TAB ==============
+
+async function loadPortals() {
+    const res = await fetch('/api/portals');
+    const portals = await res.json();
+    const tbody = document.getElementById('portals-tbody');
+    tbody.innerHTML = portals.map(p => `
+        <tr>
+            <td>${p.name}</td>
+            <td>${p.url}</td>
+            <td><span class="status-badge ${p.enabled ? 'enabled' : 'disabled'}">${p.enabled ? 'Enabled' : 'Disabled'}</span></td>
+            <td>
+                <button class="btn btn-small btn-secondary btn-toggle" data-id="${p.id}" data-enabled="${p.enabled}">${p.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn btn-small btn-danger btn-delete" data-id="${p.id}">Delete</button>
+            </td>
+        </tr>
+    `).join('');
+    
+    tbody.querySelectorAll('.btn-toggle').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            await fetch(`/api/portals/${btn.dataset.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: btn.dataset.enabled !== 'true' })
+            });
+            loadPortals(); loadPortalSelect();
+        });
+    });
+    
+    tbody.querySelectorAll('.btn-delete').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            if (confirm('Delete?')) {
+                await fetch(`/api/portals/${btn.dataset.id}`, { method: 'DELETE' });
+                loadPortals(); loadPortalSelect();
+            }
+        });
+    });
+}
+
+document.getElementById('btn-add-portal').addEventListener('click', async () => {
+    const name = document.getElementById('portal-name').value.trim();
+    const url = document.getElementById('portal-url').value.trim();
+    if (!url) { alert('Enter URL'); return; }
+    await fetch('/api/portals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, url }) });
+    document.getElementById('portal-name').value = '';
+    document.getElementById('portal-url').value = '';
+    loadPortals(); loadPortalSelect();
+});
+
+// ============== MAC LIST TAB ==============
+
+async function loadMacList() {
+    const res = await fetch('/api/maclist');
+    const data = await res.json();
+    document.getElementById('mac-list-textarea').value = data.macs.join('\n');
+    document.getElementById('maclist-count').textContent = data.count;
+    document.getElementById('mac-list-count').textContent = data.count;
+}
+
+document.getElementById('btn-save-maclist').addEventListener('click', async () => {
+    const macs = document.getElementById('mac-list-textarea').value;
+    const res = await fetch('/api/maclist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ macs }) });
+    const data = await res.json();
+    if (data.success) {
+        document.getElementById('maclist-count').textContent = data.count;
+        document.getElementById('mac-list-count').textContent = data.count;
+        alert(`Saved ${data.count} MACs`);
+    }
+});
+
+document.getElementById('btn-clear-maclist').addEventListener('click', async () => {
+    if (confirm('Clear all?')) {
+        await fetch('/api/maclist', { method: 'DELETE' });
+        document.getElementById('mac-list-textarea').value = '';
+        document.getElementById('maclist-count').textContent = '0';
+        document.getElementById('mac-list-count').textContent = '0';
+    }
+});
+
+document.getElementById('btn-import-file').addEventListener('click', async () => {
+    const fileInput = document.getElementById('mac-file-input');
+    if (!fileInput.files.length) { alert('Select file'); return; }
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    const res = await fetch('/api/maclist/import', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.success) { loadMacList(); alert(`Imported ${data.count} MACs`); }
+});
+
 // ============== PROXIES TAB ==============
 
 let proxyInterval = null;
+
+async function loadProxySources() {
+    const res = await fetch('/api/proxies/sources');
+    const data = await res.json();
+    document.getElementById('proxy-sources').value = (data.sources || []).join('\n');
+}
+
+document.getElementById('btn-save-sources').addEventListener('click', async () => {
+    const sources = document.getElementById('proxy-sources').value;
+    await fetch('/api/proxies/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources }) });
+    alert('Sources saved!');
+});
 
 document.getElementById('btn-fetch-proxies').addEventListener('click', async () => {
     await fetch('/api/proxies/fetch', { method: 'POST' });
@@ -257,6 +481,11 @@ document.getElementById('btn-test-proxies').addEventListener('click', async () =
     startProxyPolling();
 });
 
+document.getElementById('btn-reset-errors').addEventListener('click', async () => {
+    await fetch('/api/proxies/reset-errors', { method: 'POST' });
+    alert('Proxy errors reset');
+});
+
 document.getElementById('btn-clear-proxies').addEventListener('click', async () => {
     await fetch('/api/proxies', { method: 'DELETE' });
     document.getElementById('proxy-list').value = '';
@@ -265,11 +494,7 @@ document.getElementById('btn-clear-proxies').addEventListener('click', async () 
 
 document.getElementById('btn-save-proxies').addEventListener('click', async () => {
     const proxies = document.getElementById('proxy-list').value;
-    await fetch('/api/proxies', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ proxies })
-    });
+    await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxies }) });
     alert('Proxies saved!');
 });
 
@@ -281,25 +506,16 @@ function startProxyPolling() {
 async function updateProxyStatus() {
     const res = await fetch('/api/proxies/status');
     const data = await res.json();
-    
     const logBox = document.getElementById('proxy-log');
-    logBox.innerHTML = data.logs.map(l => 
-        `<div class="log-entry ${l.level}"><span class="time">${l.time}</span>${l.message}</div>`
-    ).join('');
+    logBox.innerHTML = data.logs.map(l => `<div class="log-entry ${l.level}"><span class="time">${l.time}</span>${l.message}</div>`).join('');
     logBox.scrollTop = logBox.scrollHeight;
-    
     if (data.proxies.length > 0) {
         document.getElementById('proxy-list').value = data.proxies.join('\n');
         document.getElementById('proxy-count').textContent = data.proxies.length;
     }
-    
-    if (!data.fetching && !data.testing) {
-        clearInterval(proxyInterval);
-        proxyInterval = null;
-    }
+    if (!data.fetching && !data.testing) { clearInterval(proxyInterval); proxyInterval = null; }
 }
 
-// Load proxies on page load
 (async () => {
     const res = await fetch('/api/proxies');
     const data = await res.json();
@@ -311,37 +527,19 @@ async function updateProxyStatus() {
 
 // ============== FOUND MACS TAB ==============
 
-document.getElementById('btn-export-txt').addEventListener('click', () => {
-    window.location.href = '/api/found/export?format=txt';
-});
-
-document.getElementById('btn-export-json').addEventListener('click', () => {
-    window.location.href = '/api/found/export?format=json';
-});
-
+document.getElementById('btn-export-txt').addEventListener('click', () => { window.location.href = '/api/found/export?format=txt'; });
+document.getElementById('btn-export-json').addEventListener('click', () => { window.location.href = '/api/found/export?format=json'; });
 document.getElementById('btn-clear-found').addEventListener('click', async () => {
-    if (confirm('Clear all found MACs?')) {
-        await fetch('/api/found', { method: 'DELETE' });
-        loadFoundMacs();
-    }
+    if (confirm('Clear all?')) { await fetch('/api/found', { method: 'DELETE' }); loadFoundMacs(); }
 });
 
 async function loadFoundMacs() {
     const res = await fetch('/api/found');
     const data = await res.json();
-    
-    const tbody = document.getElementById('found-tbody');
-    tbody.innerHTML = data.map(m => `
-        <tr>
-            <td>${m.mac}</td>
-            <td>${m.expiry || 'N/A'}</td>
-            <td>${m.portal || 'N/A'}</td>
-            <td>${m.found_at ? new Date(m.found_at).toLocaleString() : 'N/A'}</td>
-        </tr>
+    document.getElementById('found-tbody').innerHTML = data.map(m => `
+        <tr><td>${m.mac}</td><td>${m.expiry || 'N/A'}</td><td>${m.portal || 'N/A'}</td><td>${m.found_at ? new Date(m.found_at).toLocaleString() : 'N/A'}</td></tr>
     `).join('');
 }
-
-// Load found MACs on page load
 loadFoundMacs();
 
 // ============== SETTINGS TAB ==============
@@ -354,24 +552,16 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         use_proxies: document.getElementById('setting-use-proxies').checked,
         auto_save: document.getElementById('setting-auto-save').checked
     };
-    
-    await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-    });
-    
+    await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
     alert('Settings saved!');
 });
 
-// Load settings on page load
 (async () => {
     const res = await fetch('/api/settings');
-    const settings = await res.json();
-    
-    document.getElementById('setting-speed').value = settings.speed || 10;
-    document.getElementById('setting-timeout').value = settings.timeout || 10;
-    document.getElementById('setting-prefix').value = settings.mac_prefix || '00:1A:79:';
-    document.getElementById('setting-use-proxies').checked = settings.use_proxies || false;
-    document.getElementById('setting-auto-save').checked = settings.auto_save !== false;
+    const s = await res.json();
+    document.getElementById('setting-speed').value = s.speed || 10;
+    document.getElementById('setting-timeout').value = s.timeout || 10;
+    document.getElementById('setting-prefix').value = s.mac_prefix || '00:1A:79:';
+    document.getElementById('setting-use-proxies').checked = s.use_proxies || false;
+    document.getElementById('setting-auto-save').checked = s.auto_save !== false;
 })();

@@ -116,3 +116,52 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
 th { background: var(--bg-input); color: var(--accent); }
 tr:hover { background: rgba(255,255,255,0.05); }
+
+
+/* Additional styles for new features */
+.radio-group { display: flex; gap: 20px; flex-wrap: wrap; }
+.radio-group label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.radio-group input[type="radio"] { width: auto; }
+
+.info-panel { background: var(--bg-input); }
+.info-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.info-row:last-child { border-bottom: none; }
+.info-row span:first-child { color: var(--text-secondary); }
+.info-row span:last-child { font-family: monospace; color: var(--accent); }
+
+.help-text { background: rgba(233, 69, 96, 0.1); padding: 15px; border-radius: 6px; margin-bottom: 15px; font-size: 0.9rem; line-height: 1.6; }
+.help-text strong { color: var(--accent); }
+
+.status-badge { padding: 4px 12px; border-radius: 20px; font-size: 0.8rem; }
+.status-badge.enabled { background: var(--success); color: white; }
+.status-badge.disabled { background: var(--text-secondary); color: white; }
+
+.btn-small { padding: 6px 12px; font-size: 0.85rem; }
+
+input[type="file"] { padding: 10px; background: var(--bg-input); border-radius: 6px; }
+
+
+/* Video Player Styles */
+.video-container { background: #000; border-radius: 6px; overflow: hidden; }
+.video-container video { width: 100%; max-height: 500px; display: block; }
+.player-info { padding: 10px; background: var(--bg-input); border-radius: 0 0 6px 6px; }
+#player-status { color: var(--text-secondary); font-size: 0.9rem; }
+
+
+/* Multi-Portal Attack Styles */
+.attack-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 15px; background: var(--bg-input); border-radius: 6px;
+    margin-bottom: 10px; cursor: pointer; transition: all 0.2s;
+    border-left: 4px solid var(--success);
+}
+.attack-item:hover { background: rgba(255,255,255,0.1); }
+.attack-item.selected { border-color: var(--accent); background: rgba(233, 69, 96, 0.2); }
+.attack-item.finished { border-color: var(--text-secondary); opacity: 0.7; }
+.attack-info { flex: 1; }
+.attack-url { display: block; font-weight: bold; margin-bottom: 5px; word-break: break-all; }
+.attack-stats { font-size: 0.85rem; color: var(--text-secondary); }
+.attack-actions { display: flex; gap: 5px; }
+.no-attacks { text-align: center; padding: 30px; color: var(--text-secondary); }
+
+#proxy-sources { height: 100px; }

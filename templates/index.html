@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MacAttack-Web</title>
     <link rel="stylesheet" href="/static/style.css">
+    <!-- HLS.js for streaming -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
     <div class="container">
@@ -16,6 +18,8 @@
         <nav class="tabs">
             <button class="tab-btn active" data-tab="attack">Mac Attack</button>
             <button class="tab-btn" data-tab="player">Mac Player</button>
+            <button class="tab-btn" data-tab="portals">Portals</button>
+            <button class="tab-btn" data-tab="maclist">MAC List</button>
             <button class="tab-btn" data-tab="proxies">Proxies</button>
             <button class="tab-btn" data-tab="found">Found MACs</button>
             <button class="tab-btn" data-tab="settings">Settings</button>
@@ -25,48 +29,88 @@
         <div id="attack" class="tab-content active">
             <div class="panel">
                 <h2>Portal Configuration</h2>
+                <div class="form-row">
+                    <div class="form-group" style="flex: 2;">
+                        <label>Portal URL:</label>
+                        <input type="text" id="attack-url" placeholder="http://example.com/c/">
+                    </div>
+                    <div class="form-group">
+                        <label>Or select saved:</label>
+                        <select id="attack-portal-select">
+                            <option value="">-- Select Portal --</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="form-group">
-                    <label>Portal URL:</label>
-                    <input type="text" id="attack-url" placeholder="http://example.com/c/">
+                    <label>Attack Mode:</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="attack-mode" value="random" checked> Random MAC Generation</label>
+                        <label><input type="radio" name="attack-mode" value="list"> Use MAC List (<span id="mac-list-count">0</span> MACs)</label>
+                    </div>
                 </div>
                 <div class="button-group">
-                    <button id="btn-start" class="btn btn-success">▶ Start</button>
-                    <button id="btn-pause" class="btn btn-warning" disabled>⏸ Pause</button>
-                    <button id="btn-stop" class="btn btn-danger" disabled>⏹ Stop</button>
+                    <button id="btn-start" class="btn btn-success">▶ Start Attack</button>
+                    <button id="btn-start-multi" class="btn btn-primary">▶ Start All Enabled Portals</button>
+                    <button id="btn-stop-all" class="btn btn-danger">⏹ Stop All</button>
+                    <button id="btn-clear-finished" class="btn btn-secondary">Clear Finished</button>
                 </div>
             </div>
 
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <span class="stat-label">Tested</span>
-                    <span class="stat-value" id="stat-tested">0</span>
-                </div>
-                <div class="stat-card success">
-                    <span class="stat-label">Hits</span>
-                    <span class="stat-value" id="stat-hits">0</span>
-                </div>
-                <div class="stat-card error">
-                    <span class="stat-label">Errors</span>
-                    <span class="stat-value" id="stat-errors">0</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">Time</span>
-                    <span class="stat-value" id="stat-time">00:00</span>
-                </div>
+            <!-- Running Attacks Overview -->
+            <div class="panel" id="attacks-overview">
+                <h2>Running Attacks</h2>
+                <div id="attacks-list"></div>
             </div>
 
-            <div class="panel">
-                <h2>Current MAC: <span id="current-mac">-</span></h2>
-            </div>
-
-            <div class="two-columns">
-                <div class="panel">
-                    <h2>Found MACs</h2>
-                    <div class="log-box" id="found-list"></div>
+            <!-- Selected Attack Details -->
+            <div id="attack-details" style="display: none;">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <span class="stat-label">Tested</span>
+                        <span class="stat-value" id="stat-tested">0</span>
+                    </div>
+                    <div class="stat-card success">
+                        <span class="stat-label">Hits</span>
+                        <span class="stat-value" id="stat-hits">0</span>
+                    </div>
+                    <div class="stat-card error">
+                        <span class="stat-label">Errors</span>
+                        <span class="stat-value" id="stat-errors">0</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-label">Time</span>
+                        <span class="stat-value" id="stat-time">00:00</span>
+                    </div>
                 </div>
-                <div class="panel">
-                    <h2>Log</h2>
-                    <div class="log-box" id="attack-log"></div>
+
+                <div class="panel info-panel">
+                    <div class="info-row">
+                        <span>Portal:</span>
+                        <span id="current-portal">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span>Current MAC:</span>
+                        <span id="current-mac">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span>Current Proxy:</span>
+                        <span id="current-proxy">None</span>
+                    </div>
+                    <div class="info-row" id="list-progress-row" style="display: none;">
+                        <span>List Progress:</span>
+                        <span id="list-progress">0 / 0</span>
+                    </div>
+                </div>
+
+                <div class="two-columns">
+                    <div class="panel">
+                        <h2>Found MACs</h2>
+                        <div class="log-box" id="found-list"></div>
+                    </div>
+                    <div class="panel">
+                        <h2>Live Log</h2>
+                        <div class="log-box" id="attack-log"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -112,7 +156,82 @@
                 <h2>Stream URL</h2>
                 <div class="stream-url-box">
                     <input type="text" id="stream-url" readonly placeholder="Select a channel to get stream URL">
+                    <button id="btn-play" class="btn btn-success">▶ Play</button>
                     <button id="btn-copy-url" class="btn btn-secondary">Copy</button>
+                    <button id="btn-open-external" class="btn btn-secondary">Open in VLC</button>
+                </div>
+            </div>
+
+            <div class="panel" id="video-panel" style="display: none;">
+                <h2>Video Player <button id="btn-close-player" class="btn btn-small btn-danger" style="float: right;">✕ Close</button></h2>
+                <div class="video-container">
+                    <video id="video-player" controls autoplay>
+                        Your browser does not support the video tag.
+                    </video>
+                </div>
+                <div class="player-info">
+                    <span id="player-status">Ready</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- PORTALS TAB -->
+        <div id="portals" class="tab-content">
+            <div class="panel">
+                <h2>Add New Portal</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Portal Name:</label>
+                        <input type="text" id="portal-name" placeholder="My Portal">
+                    </div>
+                    <div class="form-group" style="flex: 2;">
+                        <label>Portal URL:</label>
+                        <input type="text" id="portal-url" placeholder="http://example.com/c/">
+                    </div>
+                </div>
+                <button id="btn-add-portal" class="btn btn-success">Add Portal</button>
+            </div>
+
+            <div class="panel">
+                <h2>Saved Portals</h2>
+                <div class="help-text">
+                    <strong>Portal URL Format:</strong> http://hostname:port/c/ oder http://hostname:port/stalker_portal/c/
+                </div>
+                <table id="portals-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>URL</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="portals-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- MAC LIST TAB -->
+        <div id="maclist" class="tab-content">
+            <div class="panel">
+                <h2>Import MAC List</h2>
+                <div class="help-text">
+                    Import a list of MAC addresses to test. One MAC per line.<br>
+                    <strong>Supported formats:</strong> 00:1A:79:XX:XX:XX, 00-1A-79-XX-XX-XX
+                </div>
+                <div class="form-group">
+                    <label>Upload File:</label>
+                    <input type="file" id="mac-file-input" accept=".txt,.csv">
+                </div>
+                <button id="btn-import-file" class="btn btn-primary">Import from File</button>
+            </div>
+
+            <div class="panel">
+                <h2>MAC Addresses (<span id="maclist-count">0</span>)</h2>
+                <textarea id="mac-list-textarea" placeholder="Enter MAC addresses (one per line)&#10;00:1A:79:XX:XX:XX&#10;00:1A:79:YY:YY:YY"></textarea>
+                <div class="button-group">
+                    <button id="btn-save-maclist" class="btn btn-success">Save MAC List</button>
+                    <button id="btn-clear-maclist" class="btn btn-danger">Clear All</button>
                 </div>
             </div>
         </div>
@@ -121,17 +240,30 @@
         <div id="proxies" class="tab-content">
             <div class="panel">
                 <h2>Proxy Management</h2>
+                <div class="help-text">
+                    <strong>Supported Proxy Types:</strong> HTTP (ip:port), SOCKS4 (socks4://ip:port), SOCKS5 (socks5://ip:port, socks5://user:pass@ip:port)
+                </div>
                 <div class="button-group">
                     <button id="btn-fetch-proxies" class="btn btn-primary">Fetch Proxies</button>
                     <button id="btn-test-proxies" class="btn btn-warning">Test Proxies</button>
+                    <button id="btn-reset-errors" class="btn btn-secondary">Reset Errors</button>
                     <button id="btn-clear-proxies" class="btn btn-danger">Clear</button>
                 </div>
+            </div>
+
+            <div class="panel">
+                <h2>Custom Proxy Sources</h2>
+                <div class="help-text">
+                    Add your own proxy list URLs. These will be fetched when you click "Fetch Proxies".
+                </div>
+                <textarea id="proxy-sources" placeholder="Enter proxy source URLs (one per line)&#10;https://example.com/proxy-list.txt"></textarea>
+                <button id="btn-save-sources" class="btn btn-success">Save Sources</button>
             </div>
 
             <div class="two-columns">
                 <div class="panel">
                     <h2>Proxies (<span id="proxy-count">0</span>)</h2>
-                    <textarea id="proxy-list" placeholder="Enter proxies (one per line)&#10;Format: ip:port"></textarea>
+                    <textarea id="proxy-list" placeholder="Enter proxies (one per line)&#10;Format: ip:port or socks5://ip:port"></textarea>
                     <button id="btn-save-proxies" class="btn btn-success">Save Proxies</button>
                 </div>
                 <div class="panel">
