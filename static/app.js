@@ -357,7 +357,33 @@ document.getElementById('btn-close-player').addEventListener('click', () => {
 
 document.getElementById('btn-open-external').addEventListener('click', () => {
     const url = document.getElementById('stream-url').value;
-    if (url) window.open(`vlc://${url}`, '_blank');
+    if (!url) { alert('No stream URL'); return; }
+    
+    // Try multiple methods to open in VLC
+    // Method 1: vlc:// protocol (works if VLC is registered)
+    const vlcUrl = `vlc://${url}`;
+    
+    // Method 2: Create a temporary .m3u file download
+    const m3uContent = `#EXTM3U\n#EXTINF:-1,Stream\n${url}`;
+    const blob = new Blob([m3uContent], { type: 'audio/x-mpegurl' });
+    const downloadUrl = URL.createObjectURL(blob);
+    
+    // Show options
+    const choice = confirm('Click OK to download .m3u playlist file (open with VLC)\nClick Cancel to try vlc:// protocol directly');
+    
+    if (choice) {
+        // Download m3u file
+        const a = document.createElement('a');
+        a.href = downloadUrl;
+        a.download = 'stream.m3u';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(downloadUrl);
+    } else {
+        // Try vlc:// protocol
+        window.location.href = vlcUrl;
+    }
 });
 
 function playStream(url) {
@@ -368,22 +394,88 @@ function playStream(url) {
     panel.style.display = 'block';
     status.textContent = 'Loading...';
     
-    if (url.includes('.m3u8')) {
+    // Check if HLS stream (.m3u8)
+    if (url.includes('.m3u8') || url.includes('m3u8')) {
+        if (Hls.isSupported()) {
+            hls = new Hls({ 
+                debug: false, 
+                enableWorker: true,
+                lowLatencyMode: true,
+                backBufferLength: 90
+            });
+            hls.loadSource(url);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => { 
+                status.textContent = 'Playing (HLS)'; 
+                video.play().catch(e => status.textContent = 'Click to play'); 
+            });
+            hls.on(Hls.Events.ERROR, (e, d) => { 
+                if (d.fatal) {
+                    status.textContent = 'HLS Error - Try VLC';
+                    console.error('HLS Error:', d);
+                }
+            });
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            // Safari native HLS
+            video.src = url;
+            video.addEventListener('loadedmetadata', () => { 
+                status.textContent = 'Playing (Native HLS)'; 
+                video.play().catch(e => status.textContent = 'Click to play'); 
+            });
+        } else {
+            status.textContent = 'HLS not supported - Use VLC';
+        }
+    } 
+    // Try MPEG-TS streams with HLS.js (some work)
+    else if (url.includes('.ts') || url.includes('/live/') || url.includes(':8080')) {
+        // Try HLS.js first for TS streams
         if (Hls.isSupported()) {
             hls = new Hls({ debug: false, enableWorker: true });
             hls.loadSource(url);
             hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'Playing (HLS)'; video.play(); });
-            hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) status.textContent = 'Error: ' + d.type; });
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            hls.on(Hls.Events.MANIFEST_PARSED, () => { 
+                status.textContent = 'Playing (TS/HLS)'; 
+                video.play().catch(e => status.textContent = 'Click to play'); 
+            });
+            hls.on(Hls.Events.ERROR, (e, d) => { 
+                if (d.fatal) {
+                    // Fallback to direct play
+                    stopPlayer();
+                    video.src = url;
+                    video.play().then(() => {
+                        status.textContent = 'Playing (Direct)';
+                    }).catch(() => {
+                        status.textContent = 'Format not supported - Use VLC';
+                    });
+                }
+            });
+        } else {
+            // Direct play attempt
             video.src = url;
-            video.addEventListener('loadedmetadata', () => { status.textContent = 'Playing'; video.play(); });
+            video.play().then(() => {
+                status.textContent = 'Playing';
+            }).catch(() => {
+                status.textContent = 'Format not supported - Use VLC';
+            });
         }
-    } else {
-        video.src = url;
-        video.addEventListener('loadedmetadata', () => { status.textContent = 'Playing'; video.play(); });
-        video.addEventListener('error', () => { status.textContent = 'Error - Try VLC'; });
     }
+    // Standard video formats (mp4, webm, etc.)
+    else {
+        video.src = url;
+        video.addEventListener('canplay', () => { 
+            status.textContent = 'Playing'; 
+            video.play().catch(e => status.textContent = 'Click video to play'); 
+        });
+        video.addEventListener('error', (e) => { 
+            console.error('Video error:', e);
+            status.textContent = 'Format not supported in browser - Use VLC';
+        });
+    }
+    
+    // Click to play (for autoplay restrictions)
+    video.addEventListener('click', () => {
+        video.play().catch(() => {});
+    });
 }
 
 function stopPlayer() {
