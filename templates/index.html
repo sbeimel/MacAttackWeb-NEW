@@ -366,6 +366,42 @@
             </div>
 
             <div class="panel">
+    <h2>Network & Timeout Settings</h2>
+    <div class="help-text">
+        <strong>âš¡ Performance Tip:</strong> Set "Session Max Retries" to 0 for fastest scanning.<br>
+        This makes dead/slow portals fail immediately instead of retrying multiple times.<br>
+        <strong>Warning:</strong> May increase false negatives on unstable networks.
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>Session Max Retries:</label>
+            <input type="number" id="setting-session-retries" min="0" max="5" value="0">
+            <small style="color: var(--text-secondary);">
+                0 = No retries (fastest, recommended)<br>
+                1-5 = Retry on failures (slower but more reliable)
+            </small>
+        </div>
+        <div class="form-group">
+            <label>Connect Timeout (seconds):</label>
+            <input type="number" id="setting-connect-timeout" min="1" max="30" value="5">
+            <small style="color: var(--text-secondary);">
+                How long to wait for initial connection<br>
+                Lower = faster scan, higher = more reliable
+            </small>
+        </div>
+        <div class="form-group">
+            <label>Read Timeout (seconds):</label>
+            <input type="number" id="setting-read-timeout" min="1" max="60" value="10">
+            <small style="color: var(--text-secondary);">
+                How long to wait for server response<br>
+                Should be >= main timeout setting
+            </small>
+        </div>
+    </div>
+    <button id="btn-save-network-settings" class="btn btn-success">Save Network Settings</button>
+</div>
+            
+            <div class="panel">
                 <h2>Proxy Settings</h2>
                 <div class="form-row">
                     <div class="form-group">
