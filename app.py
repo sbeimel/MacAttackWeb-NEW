@@ -88,6 +88,8 @@ defaultSettings = {
     "auto_save": True,
     "max_proxy_errors": 5,
     "proxy_test_threads": 50,
+    "unlimited_mac_retries": False,
+    "max_mac_retries": 3,
 }
 
 # Default proxy sources
@@ -427,16 +429,25 @@ def api_maclist_import():
         return jsonify({"success": False, "error": "No file uploaded"})
     
     file = request.files["file"]
+    append_mode = request.form.get("append", "true").lower() == "true"
     
     # Read file content
     content = file.read().decode("utf-8", errors="ignore")
     lines = content.strip().split("\n")
     total_lines = len(lines)
     
-    logger.info(f"Processing {total_lines} lines from MAC import...")
+    logger.info(f"Processing {total_lines} lines from MAC import (append={append_mode})...")
+    
+    # Start with existing MACs if append mode
+    if append_mode:
+        existing_macs = set(config.get("mac_list", []))
+        existing_count = len(existing_macs)
+    else:
+        existing_macs = set()
+        existing_count = 0
     
     # Use set for O(1) duplicate checking
-    mac_set = set()
+    new_macs = set()
     invalid = 0
     
     for line in lines:
@@ -445,23 +456,27 @@ def api_maclist_import():
             mac = mac.replace("-", ":").replace(".", ":")
             # Basic MAC format validation
             if len(mac) == 17 and mac.count(':') == 5:
-                mac_set.add(mac)
+                if mac not in existing_macs:
+                    new_macs.add(mac)
             else:
                 invalid += 1
         elif mac:
             invalid += 1
     
-    macs = list(mac_set)
-    duplicates = total_lines - len(macs) - invalid
+    # Combine existing and new
+    all_macs = list(existing_macs | new_macs)
+    duplicates = total_lines - len(new_macs) - invalid
     
-    config["mac_list"] = macs
+    config["mac_list"] = all_macs
     save_config()
     
-    logger.info(f"MAC import complete: {len(macs)} unique MACs")
+    logger.info(f"MAC import complete: {len(new_macs)} new MACs added, {len(all_macs)} total")
     
     return jsonify({
         "success": True, 
-        "count": len(macs),
+        "count": len(all_macs),
+        "new_count": len(new_macs),
+        "existing_count": existing_count,
         "total_lines": total_lines,
         "duplicates": max(0, duplicates),
         "invalid": invalid
@@ -660,9 +675,8 @@ def run_attack(portal_id):
     mac_prefix = settings.get("mac_prefix", "00:1A:79:")
     mode = state.get("mode", "random")
     max_proxy_errors = settings.get("max_proxy_errors", MAX_PROXY_ERRORS)
-    
-    # Max retries per MAC when proxy fails (to avoid infinite loops)
-    MAX_MAC_RETRIES = 3
+    unlimited_mac_retries = settings.get("unlimited_mac_retries", False)
+    max_mac_retries = settings.get("max_mac_retries", 3)
     
     proxies = config.get("proxies", []) if use_proxies else []
     proxy_index = 0
@@ -693,6 +707,11 @@ def run_attack(portal_id):
     
     # Log mode and MAC list info
     add_log(state, f"Attack started with {speed} threads, mode: {mode}", "info")
+    if unlimited_mac_retries:
+        add_log(state, f"Unlimited MAC retries enabled - MACs will retry until proxy works", "info")
+    else:
+        add_log(state, f"Max {max_mac_retries} retries per MAC on proxy errors", "info")
+    
     if mode == "list":
         add_log(state, f"MAC list has {len(mac_list)} entries", "info")
         state["mac_list_total"] = len(mac_list)
@@ -880,20 +899,34 @@ def run_attack(portal_id):
                         else:
                             add_log(state, f"⚠ Proxy error ({error_count}/{max_proxy_errors}): {proxy} - {str(e)[:40]}", "warning")
                         
-                        # Retry MAC with different proxy (like original MacAttack behavior)
-                        # Only retry if we haven't exceeded max retries for this MAC
+                        # Retry MAC with different proxy
                         mac_retry_counts[mac] += 1
-                        if mac_retry_counts[mac] < MAX_MAC_RETRIES:
-                            # Add to retry queue - will be tested with a different proxy
-                            retry_queue.append(mac)
-                            add_log(state, f"🔄 Queuing {mac} for retry ({mac_retry_counts[mac]}/{MAX_MAC_RETRIES})", "info")
-                            # Don't count as tested yet - will be retried
+                        
+                        # Check if we have working proxies left
+                        working_proxies_left = [p for p in proxies if proxy_error_counts.get(p, 0) < max_proxy_errors]
+                        
+                        if unlimited_mac_retries:
+                            # Unlimited retries - keep retrying as long as there are working proxies
+                            if working_proxies_left:
+                                retry_queue.append(mac)
+                                add_log(state, f"🔄 Queuing {mac} for retry (attempt {mac_retry_counts[mac]}, {len(working_proxies_left)} proxies left)", "info")
+                            else:
+                                # No working proxies left - count as error
+                                state["tested"] += 1
+                                state["errors"] += 1
+                                add_log(state, f"✗ {mac} - All proxies exhausted, skipping", "error")
+                                del mac_retry_counts[mac]
                         else:
-                            # Max retries reached - count as error
-                            state["tested"] += 1
-                            state["errors"] += 1
-                            add_log(state, f"✗ {mac} - Max retries reached, skipping", "error")
-                            del mac_retry_counts[mac]
+                            # Limited retries
+                            if mac_retry_counts[mac] < max_mac_retries:
+                                retry_queue.append(mac)
+                                add_log(state, f"🔄 Queuing {mac} for retry ({mac_retry_counts[mac]}/{max_mac_retries})", "info")
+                            else:
+                                # Max retries reached - count as error
+                                state["tested"] += 1
+                                state["errors"] += 1
+                                add_log(state, f"✗ {mac} - Max retries ({max_mac_retries}) reached, skipping", "error")
+                                del mac_retry_counts[mac]
                     else:
                         # Non-proxy error - count as tested
                         state["tested"] += 1
@@ -1029,14 +1062,18 @@ def api_proxies_remove_failed():
     if not failed:
         return jsonify({"success": False, "error": "No failed proxies to remove. Run 'Test Proxies' first."})
     
+    # Use set for O(1) lookup instead of O(n) list lookup
+    failed_set = set(failed)
     current = config.get("proxies", [])
-    remaining = [p for p in current if p not in failed]
+    remaining = [p for p in current if p not in failed_set]
     
+    removed_count = len(current) - len(remaining)
     config["proxies"] = remaining
     proxy_state["failed_proxies"] = []
+    proxy_state["proxies"] = remaining
     save_config()
     
-    return jsonify({"success": True, "removed": len(failed), "remaining": len(remaining)})
+    return jsonify({"success": True, "removed": removed_count, "remaining": len(remaining)})
 
 
 @app.route("/api/proxies/test-autodetect", methods=["POST"])

@@ -589,19 +589,30 @@ document.getElementById('btn-add-portal').addEventListener('click', async () => 
 
 // ============== MAC LIST TAB ==============
 
+// Track if we have a large list (read-only mode)
+let macListIsLarge = false;
+
 async function loadMacList() {
     const res = await fetch('/api/maclist');
     const data = await res.json();
+    const textarea = document.getElementById('mac-list-textarea');
     
-    // For large lists (>10000), don't show all MACs in textarea to avoid browser freeze
+    // For large lists (>10000), show read-only preview
     if (data.count > 10000) {
-        document.getElementById('mac-list-textarea').value = 
-            `# ${data.count} MACs loaded (too many to display)\n` +
+        macListIsLarge = true;
+        textarea.value = 
+            `# ${data.count} MACs loaded (read-only preview)\n` +
+            `# Use "Import from File" to add more MACs\n` +
             `# First 100 MACs:\n` +
             data.macs.slice(0, 100).join('\n') +
             `\n\n# ... and ${data.count - 100} more`;
+        textarea.readOnly = true;
+        textarea.style.backgroundColor = '#2a2a2a';
     } else {
-        document.getElementById('mac-list-textarea').value = data.macs.join('\n');
+        macListIsLarge = false;
+        textarea.value = data.macs.join('\n');
+        textarea.readOnly = false;
+        textarea.style.backgroundColor = '';
     }
     
     document.getElementById('maclist-count').textContent = data.count;
@@ -609,6 +620,11 @@ async function loadMacList() {
 }
 
 document.getElementById('btn-save-maclist').addEventListener('click', async () => {
+    if (macListIsLarge) {
+        alert('Large MAC list is in read-only mode.\nUse "Import from File" to add more MACs,\nor "Clear All" first to start fresh.');
+        return;
+    }
+    
     const macs = document.getElementById('mac-list-textarea').value;
     const res = await fetch('/api/maclist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ macs }) });
     const data = await res.json();
@@ -662,6 +678,7 @@ document.getElementById('btn-import-file').addEventListener('click', async () =>
     try {
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('append', 'true');  // Always append to existing list
         
         // Use XMLHttpRequest for progress tracking
         const xhr = new XMLHttpRequest();
@@ -693,8 +710,9 @@ document.getElementById('btn-import-file').addEventListener('click', async () =>
         if (response.success) {
             loadMacList();
             loadFoundMacCount();
-            let msg = `✅ Imported ${response.count} MACs`;
-            if (response.duplicates > 0) msg += `\n⚠️ ${response.duplicates} duplicates removed`;
+            let msg = `✅ Added ${response.new_count} new MACs\n📊 Total: ${response.count} MACs`;
+            if (response.existing_count > 0) msg += `\n📁 Previously had: ${response.existing_count}`;
+            if (response.duplicates > 0) msg += `\n⚠️ ${response.duplicates} duplicates skipped`;
             if (response.invalid > 0) msg += `\n❌ ${response.invalid} invalid lines skipped`;
             alert(msg);
         } else {
@@ -743,13 +761,24 @@ document.getElementById('btn-test-autodetect').addEventListener('click', async (
 });
 
 document.getElementById('btn-remove-failed').addEventListener('click', async () => {
-    const res = await fetch('/api/proxies/remove-failed', { method: 'POST' });
-    const data = await res.json();
-    if (data.success) {
-        alert(`Removed ${data.removed} failed proxies. ${data.remaining} remaining.`);
-        loadProxyList();
-    } else {
-        alert(data.error || 'No failed proxies to remove');
+    const btn = document.getElementById('btn-remove-failed');
+    btn.disabled = true;
+    btn.textContent = 'Removing...';
+    
+    try {
+        const res = await fetch('/api/proxies/remove-failed', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            alert(`Removed ${data.removed} failed proxies. ${data.remaining} remaining.`);
+            await loadProxyList();
+        } else {
+            alert(data.error || 'No failed proxies to remove');
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Remove Failed';
     }
 });
 
@@ -778,12 +807,22 @@ document.getElementById('btn-save-proxies').addEventListener('click', async () =
 async function loadProxyList() {
     const res = await fetch('/api/proxies');
     const data = await res.json();
+    const proxyList = document.getElementById('proxy-list');
+    const proxyCount = document.getElementById('proxy-count');
+    
     if (data.proxies && data.proxies.length > 0) {
-        document.getElementById('proxy-list').value = data.proxies.join('\n');
-        document.getElementById('proxy-count').textContent = data.proxies.length;
+        // For very large lists, show count only to avoid browser freeze
+        if (data.proxies.length > 5000) {
+            proxyList.value = `# ${data.proxies.length} proxies loaded (too many to display)\n# First 100:\n` + 
+                data.proxies.slice(0, 100).join('\n') + 
+                `\n\n# ... and ${data.proxies.length - 100} more`;
+        } else {
+            proxyList.value = data.proxies.join('\n');
+        }
+        proxyCount.textContent = data.proxies.length;
     } else {
-        document.getElementById('proxy-list').value = '';
-        document.getElementById('proxy-count').textContent = '0';
+        proxyList.value = '';
+        proxyCount.textContent = '0';
     }
 }
 
@@ -974,10 +1013,17 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
 document.getElementById('btn-save-proxy-settings').addEventListener('click', async () => {
     const settings = {
         proxy_test_threads: parseInt(document.getElementById('setting-proxy-test-threads').value),
-        max_proxy_errors: parseInt(document.getElementById('setting-max-proxy-errors').value)
+        max_proxy_errors: parseInt(document.getElementById('setting-max-proxy-errors').value),
+        unlimited_mac_retries: document.getElementById('setting-unlimited-retries').checked,
+        max_mac_retries: parseInt(document.getElementById('setting-max-mac-retries').value)
     };
     await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
     alert('Proxy settings saved!');
+});
+
+// Toggle max retries input based on unlimited checkbox
+document.getElementById('setting-unlimited-retries').addEventListener('change', (e) => {
+    document.getElementById('setting-max-mac-retries').disabled = e.target.checked;
 });
 
 (async () => {
@@ -990,6 +1036,9 @@ document.getElementById('btn-save-proxy-settings').addEventListener('click', asy
     document.getElementById('setting-auto-save').checked = s.auto_save !== false;
     document.getElementById('setting-proxy-test-threads').value = s.proxy_test_threads || 50;
     document.getElementById('setting-max-proxy-errors').value = s.max_proxy_errors || 5;
+    document.getElementById('setting-unlimited-retries').checked = s.unlimited_mac_retries || false;
+    document.getElementById('setting-max-mac-retries').value = s.max_mac_retries || 3;
+    document.getElementById('setting-max-mac-retries').disabled = s.unlimited_mac_retries || false;
 })();
 
 // ============== AUTHENTICATION ==============
