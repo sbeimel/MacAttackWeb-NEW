@@ -586,18 +586,27 @@ def run_attack(portal_id):
                         if settings.get("auto_save", True):
                             save_config()
                     else:
-                        # Track proxy errors
-                        message = result.get("expiry", "") or ""
-                        if isinstance(message, str) and ("timeout" in message.lower() or "connection" in message.lower()):
-                            mark_proxy_error(proxy, is_connection_error=True)
+                        # Log every test with proxy info
+                        add_log(state, f"Testing {mac}{proxy_info}", "info")
                         
-                        if state["tested"] % 100 == 0:
-                            add_log(state, f"Tested {state['tested']} MACs...{proxy_info}", "info")
+                        # Track proxy errors - check the result dict for error info
+                        if result and isinstance(result, dict):
+                            # result contains mac, portal, expiry=None etc when failed
+                            pass  # No specific error message in result dict
+                        
+                        # Log progress every 10 MACs
+                        if state["tested"] % 10 == 0:
+                            add_log(state, f"Progress: {state['tested']} tested, {state['hits']} hits{proxy_info}", "info")
                     
                 except Exception as e:
+                    state["tested"] += 1
                     state["errors"] += 1
-                    mark_proxy_error(proxy, is_connection_error=True)
-                    add_log(state, f"Error: {str(e)}", "error")
+                    error_msg = str(e).lower()
+                    if "timeout" in error_msg or "connection" in error_msg or "proxy" in error_msg:
+                        mark_proxy_error(proxy, is_connection_error=True)
+                        add_log(state, f"Proxy error for {mac}: {str(e)[:50]}", "warning")
+                    else:
+                        add_log(state, f"Error testing {mac}: {str(e)[:50]}", "error")
             
             time.sleep(0.01)
     
@@ -625,9 +634,16 @@ def api_proxies():
         data = request.json
         proxies = data.get("proxies", "").strip().split("\n")
         proxies = [p.strip() for p in proxies if p.strip()]
-        config["proxies"] = proxies
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_proxies = []
+        for p in proxies:
+            if p not in seen:
+                seen.add(p)
+                unique_proxies.append(p)
+        config["proxies"] = unique_proxies
         save_config()
-        return jsonify({"success": True, "count": len(proxies)})
+        return jsonify({"success": True, "count": len(unique_proxies)})
     
     if request.method == "DELETE":
         config["proxies"] = []

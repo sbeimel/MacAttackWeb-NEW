@@ -125,6 +125,11 @@ async function updateAllAttacks() {
         return;
     }
     
+    // Auto-select first attack if none selected
+    if (!selectedAttackId && data.attacks.length > 0) {
+        selectedAttackId = data.attacks[0].id;
+    }
+    
     listDiv.innerHTML = data.attacks.map(a => `
         <div class="attack-item ${a.id === selectedAttackId ? 'selected' : ''} ${a.running ? '' : 'finished'}" data-id="${a.id}">
             <div class="attack-info">
@@ -184,7 +189,7 @@ function updateSelectedAttack(attack) {
     document.getElementById('stat-errors').textContent = attack.errors;
     document.getElementById('current-portal').textContent = attack.portal_url;
     document.getElementById('current-mac').textContent = attack.current_mac || '-';
-    document.getElementById('current-proxy').textContent = attack.current_proxy || 'None';
+    document.getElementById('current-proxy').textContent = attack.current_proxy || 'Direct (no proxy)';
     
     const mins = Math.floor(attack.elapsed / 60);
     const secs = attack.elapsed % 60;
@@ -192,13 +197,15 @@ function updateSelectedAttack(attack) {
     
     const foundList = document.getElementById('found-list');
     foundList.innerHTML = (attack.found_macs || []).map(m => 
-        `<div class="log-entry success">${m.mac} - ${m.expiry}</div>`
+        `<div class="log-entry success"><strong>${m.mac}</strong> - ${m.expiry} - ${m.channels || 0} channels</div>`
     ).join('');
-    foundList.scrollTop = foundList.scrollHeight;
+    if (attack.found_macs && attack.found_macs.length > 0) {
+        foundList.scrollTop = foundList.scrollHeight;
+    }
     
     const logBox = document.getElementById('attack-log');
     logBox.innerHTML = (attack.logs || []).map(l => 
-        `<div class="log-entry ${l.level}"><span class="time">${l.time}</span>${l.message}</div>`
+        `<div class="log-entry ${l.level}"><span class="time">[${l.time}]</span> ${l.message}</div>`
     ).join('');
     logBox.scrollTop = logBox.scrollHeight;
 }
