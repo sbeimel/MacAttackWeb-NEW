@@ -586,7 +586,7 @@ def full_scan(url, mac, channels_count, session, token, token_random, portal_typ
         close_session(url, mac, token, portal_type, session, token_random, proxy)
 
 
-def test_mac_full(url, mac, proxy=None, timeout=15):
+def test_mac_full(url, mac, proxy=None, timeout=15, **kwargs):
     """
     Combined quick + full scan with early exit.
     
