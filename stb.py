@@ -99,6 +99,11 @@ def _generate_device_ids(mac):
     return sn, device_id, device_id2, hw_version_2, sig
 
 
+def _normalize_url(url):
+    """Normalize URL - remove trailing slashes to prevent double slashes."""
+    return url.rstrip('/')
+
+
 def _get_cookies(mac):
     """Generate cookies for STB emulation - matches original MacAttack."""
     sn, device_id, device_id2, hw_version_2, sig = _generate_device_ids(mac)
@@ -132,6 +137,7 @@ def _get_headers(token=None, token_random=None):
 
 def detect_portal_type(url, proxy=None):
     """Detect the portal type (portal.php or stalker_portal) - matches original."""
+    url = _normalize_url(url)
     parsed_url = urlparse(url)
     parsed_path = parsed_url.path
     
@@ -182,6 +188,9 @@ def get_token(url, mac, proxy=None, timeout=30):
     Get authentication token from portal.
     Includes X-Random header handling like original MacAttack.
     """
+    # Normalize URL - remove trailing slash
+    url = url.rstrip('/')
+    
     parsed_url = urlparse(url)
     parsed_path = parsed_url.path
     
@@ -203,6 +212,7 @@ def get_token(url, mac, proxy=None, timeout=30):
     if "stalker_portal/" in base_url and "stalker_portal/" in portal_type:
         base_url = base_url.replace("stalker_portal/", "")
     
+    # Build handshake URL - ensure no double slashes
     handshake_url = f"{url}/{portal_type}?action=handshake&type=stb&token=&JsHttpRequest=1-xml"
     
     try:
@@ -296,6 +306,7 @@ def get_token(url, mac, proxy=None, timeout=30):
 
 def get_profile(url, mac, token, portal_type, token_random=None, proxy=None):
     """Get account profile information."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -315,6 +326,7 @@ def get_profile(url, mac, token, portal_type, token_random=None, proxy=None):
 
 def get_account_info(url, mac, token, portal_type, token_random=None, proxy=None):
     """Get account expiration info."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -334,6 +346,7 @@ def get_account_info(url, mac, token, portal_type, token_random=None, proxy=None
 
 def get_genres(url, mac, token, portal_type, token_random=None, proxy=None):
     """Get live TV genres/categories."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -353,6 +366,7 @@ def get_genres(url, mac, token, portal_type, token_random=None, proxy=None):
 
 def get_vod_categories(url, mac, token, portal_type, token_random=None, proxy=None):
     """Get VOD categories."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -372,6 +386,7 @@ def get_vod_categories(url, mac, token, portal_type, token_random=None, proxy=No
 
 def get_series_categories(url, mac, token, portal_type, token_random=None, proxy=None):
     """Get series categories."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -391,6 +406,7 @@ def get_series_categories(url, mac, token, portal_type, token_random=None, proxy
 
 def get_channels(url, mac, token, portal_type, category_type, category_id, token_random=None, proxy=None, page=0):
     """Get channels/items from a category."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -422,6 +438,7 @@ def get_channels(url, mac, token, portal_type, category_type, category_id, token
 
 def get_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=None):
     """Get stream URL for a channel."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -450,6 +467,7 @@ def get_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=N
 
 def get_vod_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=None):
     """Get stream URL for VOD content."""
+    url = _normalize_url(url)
     try:
         session = _get_session(proxy)
         cookies = _get_cookies(mac)
@@ -478,6 +496,7 @@ def get_vod_stream_url(url, mac, token, portal_type, cmd, token_random=None, pro
 
 def test_mac(url, mac, proxy=None, timeout=15):
     """Test if a MAC address is valid on a portal."""
+    url = _normalize_url(url)
     try:
         token, token_random, portal_type, portal_version = get_token(url, mac, proxy, timeout)
         
