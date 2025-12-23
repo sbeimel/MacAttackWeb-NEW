@@ -537,8 +537,65 @@ async function loadFoundMacs() {
     const res = await fetch('/api/found');
     const data = await res.json();
     document.getElementById('found-tbody').innerHTML = data.map(m => `
-        <tr><td>${m.mac}</td><td>${m.expiry || 'N/A'}</td><td>${m.portal || 'N/A'}</td><td>${m.found_at ? new Date(m.found_at).toLocaleString() : 'N/A'}</td></tr>
+        <tr>
+            <td>${m.mac}</td>
+            <td>${m.expiry || 'N/A'}</td>
+            <td>${m.channels || 0}</td>
+            <td>${m.portal || 'N/A'}</td>
+            <td title="${(m.genres || []).join(', ')}">${(m.genres || []).length} genres</td>
+            <td>${m.found_at ? new Date(m.found_at).toLocaleString() : 'N/A'}</td>
+            <td>
+                <button class="btn btn-small btn-secondary btn-details" data-mac='${JSON.stringify(m).replace(/'/g, "&#39;")}'>Details</button>
+            </td>
+        </tr>
     `).join('');
+    
+    // Add click handlers for details buttons
+    document.querySelectorAll('.btn-details').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const mac = JSON.parse(btn.dataset.mac);
+            showMacDetails(mac);
+        });
+    });
+}
+
+function showMacDetails(mac) {
+    let details = `MAC: ${mac.mac}\n`;
+    details += `Portal: ${mac.portal || 'N/A'}\n`;
+    details += `Expiry: ${mac.expiry || 'N/A'}\n`;
+    details += `Channels: ${mac.channels || 0}\n`;
+    
+    if (mac.username && mac.password) {
+        details += `\nCredentials:\n`;
+        details += `Username: ${mac.username}\n`;
+        details += `Password: ${mac.password}\n`;
+    }
+    
+    if (mac.backend_url) {
+        details += `Backend: ${mac.backend_url}\n`;
+    }
+    
+    if (mac.max_connections) {
+        details += `Max Connections: ${mac.max_connections}\n`;
+    }
+    
+    if (mac.created_at) {
+        details += `Created: ${mac.created_at}\n`;
+    }
+    
+    if (mac.genres && mac.genres.length > 0) {
+        details += `\nGenres (${mac.genres.length}):\n${mac.genres.join(', ')}\n`;
+    }
+    
+    if (mac.vod_categories && mac.vod_categories.length > 0) {
+        details += `\nVOD Categories (${mac.vod_categories.length}):\n${mac.vod_categories.join(', ')}\n`;
+    }
+    
+    if (mac.series_categories && mac.series_categories.length > 0) {
+        details += `\nSeries Categories (${mac.series_categories.length}):\n${mac.series_categories.join(', ')}\n`;
+    }
+    
+    alert(details);
 }
 loadFoundMacs();
 
