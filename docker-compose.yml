@@ -3,7 +3,7 @@ services:
     build: .
     container_name: MacAttack-Web
     ports:
-      - "8080:8080"
+      - "5005:5005"
     dns:
       - 1.1.1.1
       - 1.0.0.1
@@ -11,12 +11,18 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     environment:
-      - HOST=0.0.0.0:8080
+      - HOST=0.0.0.0:5005
       - CONFIG=/app/data/macattack.json
+    networks:
+      - weg0
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://localhost:5005/"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+networks:
+  weg0:
+    external: true
