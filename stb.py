@@ -847,3 +847,25 @@ def test_mac_full(url, mac, proxy=None, timeout=15):
     except Exception as e:
         logger.error(f"Error in full MAC test for {mac}: {e}")
         return False, result
+def test_mac_quick(portal_url, mac, proxy=None, timeout=3):
+    """
+    Quick Scan:
+    - Handshake / Token
+    - Channels
+    Early Exit bei Fehler
+    """
+    try:
+        token = get_token(portal_url, mac, proxy, timeout)
+        if not token:
+            return None
+
+        channels = get_all_channels(portal_url, mac, token, proxy, timeout)
+        if not channels or channels <= 0:
+            return None
+
+        return {
+            "token": token,
+            "channels": channels
+        }
+    except Exception:
+        return None
