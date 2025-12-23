@@ -786,3 +786,6 @@ def get_vod_stream_url(url, mac, token, portal_type, cmd, token_random=None, pro
         return None
     finally:
         session.close()
+
+# Alias für falsche Schreibweise (Kompatibilität)
+test_mac_Full = test_mac_full
