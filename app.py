@@ -678,7 +678,7 @@ def run_attack(portal_id):
     unlimited_mac_retries = settings.get("unlimited_mac_retries", False)
     max_mac_retries = settings.get("max_mac_retries", 3)
     
-    proxies = config.get("proxies", []) if use_proxies else []
+    # Note: proxies are now loaded dynamically in the loop to support adding proxies during pause
     proxy_index = 0
     
     # Build MAC list based on mode
@@ -729,10 +729,12 @@ def run_attack(portal_id):
     else:
         add_log(state, f"Using random MACs with prefix: {mac_prefix}", "info")
     
-    if use_proxies and proxies:
-        add_log(state, f"Using {len(proxies)} proxies with rotation", "info")
-    elif use_proxies and not proxies:
-        add_log(state, "WARNING: Use Proxies enabled but no proxies loaded!", "warning")
+    if use_proxies:
+        initial_proxies = config.get("proxies", [])
+        if initial_proxies:
+            add_log(state, f"Using {len(initial_proxies)} proxies with rotation", "info")
+        else:
+            add_log(state, "WARNING: Use Proxies enabled but no proxies loaded!", "warning")
     
     with ThreadPoolExecutor(max_workers=speed) as executor:
         futures = {}
@@ -744,6 +746,9 @@ def run_attack(portal_id):
             
             if not state["running"]:
                 break
+            
+            # Reload proxies from config each iteration (allows adding proxies during pause)
+            proxies = config.get("proxies", []) if use_proxies else []
             
             # Check if we should stop adding new MACs (list or refresh mode)
             if mode in ("list", "refresh") and mac_list_index >= len(mac_list) and not retry_queue:

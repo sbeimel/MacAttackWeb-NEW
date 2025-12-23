@@ -198,33 +198,49 @@ async function updateAllAttacks() {
         </div>
     `}).join('');
     
-    // Click handlers
+    // Click handlers for attack items (select)
     listDiv.querySelectorAll('.attack-item').forEach(item => {
         item.addEventListener('click', (e) => {
-            if (!e.target.classList.contains('btn')) {
-                selectedAttackId = item.dataset.id;
-                updateSelectedAttack(data.attacks.find(a => a.id === selectedAttackId));
+            // Don't select if clicking on a button
+            if (e.target.closest('.btn')) return;
+            selectedAttackId = item.dataset.id;
+            updateSelectedAttack(data.attacks.find(a => a.id === selectedAttackId));
+        });
+    });
+    
+    // Pause button handlers
+    listDiv.querySelectorAll('.btn-pause-attack').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.id;
+            btn.disabled = true;
+            try {
+                await fetch('/api/attack/pause', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id })
+                });
+            } finally {
+                btn.disabled = false;
             }
         });
     });
     
-    listDiv.querySelectorAll('.btn-pause-attack').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            await fetch('/api/attack/pause', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: btn.dataset.id })
-            });
-        });
-    });
-    
+    // Stop button handlers
     listDiv.querySelectorAll('.btn-stop-attack').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            await fetch('/api/attack/stop', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: btn.dataset.id })
-            });
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.id;
+            btn.disabled = true;
+            try {
+                await fetch('/api/attack/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id })
+                });
+            } finally {
+                btn.disabled = false;
+            }
         });
     });
     
