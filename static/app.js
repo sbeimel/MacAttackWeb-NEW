@@ -55,6 +55,16 @@ document.getElementById('btn-start').addEventListener('click', async () => {
     
     if (!url) { alert('Please enter a portal URL'); return; }
     
+    // Check if MAC list mode but no MACs
+    if (mode === 'list') {
+        const macRes = await fetch('/api/maclist');
+        const macData = await macRes.json();
+        if (macData.count === 0) {
+            alert('MAC List is empty! Please add MACs in the MAC List tab or use Random mode.');
+            return;
+        }
+    }
+    
     const res = await fetch('/api/attack/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -81,6 +91,16 @@ document.getElementById('btn-start-multi').addEventListener('click', async () =>
     }
     
     const mode = document.querySelector('input[name="attack-mode"]:checked').value;
+    
+    // Check if MAC list mode but no MACs
+    if (mode === 'list') {
+        const macRes = await fetch('/api/maclist');
+        const macData = await macRes.json();
+        if (macData.count === 0) {
+            alert('MAC List is empty! Please add MACs in the MAC List tab or use Random mode.');
+            return;
+        }
+    }
     
     const startRes = await fetch('/api/attack/start', {
         method: 'POST',
@@ -110,7 +130,7 @@ document.getElementById('btn-clear-finished').addEventListener('click', async ()
 
 function startStatusPolling() {
     if (attackInterval) clearInterval(attackInterval);
-    attackInterval = setInterval(updateAllAttacks, 500);
+    attackInterval = setInterval(updateAllAttacks, 300);  // Poll every 300ms for faster updates
 }
 
 async function updateAllAttacks() {
