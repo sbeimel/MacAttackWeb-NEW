@@ -426,39 +426,43 @@ def api_maclist_import():
         return jsonify({"success": False, "error": "No file uploaded"})
     
     file = request.files["file"]
-    file_size = file.content_length or 0
     
     # Read file content
     content = file.read().decode("utf-8", errors="ignore")
-    total_lines = content.count('\n') + 1
+    lines = content.strip().split("\n")
+    total_lines = len(lines)
     
-    macs = []
-    duplicates = 0
+    logger.info(f"Processing {total_lines} lines from MAC import...")
+    
+    # Use set for O(1) duplicate checking
+    mac_set = set()
     invalid = 0
     
-    for line in content.strip().split("\n"):
+    for line in lines:
         mac = line.strip().upper()
         if mac and len(mac) >= 11:
             mac = mac.replace("-", ":").replace(".", ":")
             # Basic MAC format validation
             if len(mac) == 17 and mac.count(':') == 5:
-                if mac not in macs:
-                    macs.append(mac)
-                else:
-                    duplicates += 1
+                mac_set.add(mac)
             else:
                 invalid += 1
         elif mac:
             invalid += 1
     
+    macs = list(mac_set)
+    duplicates = total_lines - len(macs) - invalid
+    
     config["mac_list"] = macs
     save_config()
+    
+    logger.info(f"MAC import complete: {len(macs)} unique MACs")
     
     return jsonify({
         "success": True, 
         "count": len(macs),
         "total_lines": total_lines,
-        "duplicates": duplicates,
+        "duplicates": max(0, duplicates),
         "invalid": invalid
     })
 
@@ -618,7 +622,10 @@ def api_attack_status():
                 "found_macs": state.get("found_macs", [])[-20:],
                 "logs": state.get("logs", [])[-50:],
                 "elapsed": elapsed,
-                "portal_url": state.get("portal_url", "")
+                "portal_url": state.get("portal_url", ""),
+                "mode": state.get("mode", "random"),
+                "mac_list_index": state.get("mac_list_index", 0),
+                "mac_list_total": state.get("mac_list_total", 0)
             })
         
         return jsonify({"attacks": all_attacks})
@@ -920,11 +927,7 @@ def api_proxies_fetch():
     proxy_state["fetching"] = True
     proxy_state["logs"] = []
     
-    # Get proxy type from request
-    data = request.json or {}
-    proxy_type = data.get("proxy_type", "http")
-    
-    thread = threading.Thread(target=fetch_proxies_worker, args=(proxy_type,), daemon=True)
+    thread = threading.Thread(target=fetch_proxies_worker, daemon=True)
     thread.start()
     
     return jsonify({"success": True})
@@ -999,14 +1002,14 @@ def api_proxies_test_autodetect():
     return jsonify({"success": True})
 
 
-def fetch_proxies_worker(proxy_type="http"):
+def fetch_proxies_worker():
     """Fetch proxies from all sources including custom ones."""
     global proxy_state
     
     sources = config.get("proxy_sources", DEFAULT_PROXY_SOURCES)
     all_proxies = []
     
-    add_log(proxy_state, f"Fetching proxies as {proxy_type.upper()} type", "info")
+    add_log(proxy_state, f"Fetching proxies from {len(sources)} sources...", "info")
     
     for source in sources:
         try:
@@ -1025,14 +1028,20 @@ def fetch_proxies_worker(proxy_type="http"):
                     )
                     all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
                 else:
-                    # Generic parsing for most proxy list sites
+                    # Generic parsing - try multiple formats
+                    # 1. Try HTML table format
                     matches = re.findall(r"<td>(\d+\.\d+\.\d+\.\d+)</td><td>(\d+)</td>", response.text)
                     if matches:
                         all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
                     else:
-                        # Try plain text format
-                        matches = re.findall(r"[0-9]+(?:\.[0-9]+){3}:[0-9]+", response.text)
-                        all_proxies.extend(matches)
+                        # 2. Try to find proxies with prefixes (socks5://, socks4://, http://)
+                        prefixed = re.findall(r"((?:socks[45]|http)://[^\s<>\"']+)", response.text, re.IGNORECASE)
+                        if prefixed:
+                            all_proxies.extend(prefixed)
+                        
+                        # 3. Try plain ip:port format
+                        plain = re.findall(r"(\d+\.\d+\.\d+\.\d+:\d+)", response.text)
+                        all_proxies.extend(plain)
                 
                 add_log(proxy_state, f"Found proxies from {source}", "info")
         except Exception as e:
@@ -1041,23 +1050,9 @@ def fetch_proxies_worker(proxy_type="http"):
     # Remove duplicates
     all_proxies = list(set(all_proxies))
     
-    # Apply proxy type prefix
-    processed_proxies = []
-    for proxy in all_proxies:
-        # Skip if already has prefix
-        if proxy.startswith("socks4://") or proxy.startswith("socks5://") or proxy.startswith("http://"):
-            processed_proxies.append(proxy)
-        elif proxy_type == "socks4":
-            processed_proxies.append(f"socks4://{proxy}")
-        elif proxy_type == "socks5":
-            processed_proxies.append(f"socks5://{proxy}")
-        else:
-            # HTTP = no prefix
-            processed_proxies.append(proxy)
+    proxy_state["proxies"] = all_proxies
     
-    proxy_state["proxies"] = processed_proxies
-    
-    add_log(proxy_state, f"Total unique proxies: {len(processed_proxies)} ({proxy_type.upper()})", "success")
+    add_log(proxy_state, f"Total unique proxies: {len(all_proxies)}. Use 'Test & Auto-Detect' to determine proxy types.", "success")
     proxy_state["fetching"] = False
 
 

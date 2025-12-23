@@ -173,18 +173,30 @@ async function updateAllAttacks() {
         selectedAttackId = data.attacks[0].id;
     }
     
-    listDiv.innerHTML = data.attacks.map(a => `
+    listDiv.innerHTML = data.attacks.map(a => {
+        // Build progress info for list/refresh modes
+        let progressInfo = '';
+        if (a.mode === 'list' || a.mode === 'refresh') {
+            const total = a.mac_list_total || 0;
+            const current = a.mac_list_index || a.tested || 0;
+            if (total > 0) {
+                const percent = Math.round((current / total) * 100);
+                progressInfo = ` | 📋 ${current}/${total} (${percent}%)`;
+            }
+        }
+        
+        return `
         <div class="attack-item ${a.id === selectedAttackId ? 'selected' : ''} ${a.running ? '' : 'finished'}" data-id="${a.id}">
             <div class="attack-info">
                 <span class="attack-url">${a.portal_url}</span>
-                <span class="attack-stats">Tested: ${a.tested} | Hits: ${a.hits} | ${a.running ? '🟢 Running' : '⚫ Stopped'}</span>
+                <span class="attack-stats">Tested: ${a.tested} | Hits: ${a.hits}${progressInfo} | ${a.running ? '🟢 Running' : '⚫ Stopped'}</span>
             </div>
             <div class="attack-actions">
                 ${a.running ? `<button class="btn btn-small btn-warning btn-pause-attack" data-id="${a.id}">${a.paused ? '▶' : '⏸'}</button>` : ''}
                 ${a.running ? `<button class="btn btn-small btn-danger btn-stop-attack" data-id="${a.id}">⏹</button>` : ''}
             </div>
         </div>
-    `).join('');
+    `}).join('');
     
     // Click handlers
     listDiv.querySelectorAll('.attack-item').forEach(item => {
@@ -580,7 +592,18 @@ document.getElementById('btn-add-portal').addEventListener('click', async () => 
 async function loadMacList() {
     const res = await fetch('/api/maclist');
     const data = await res.json();
-    document.getElementById('mac-list-textarea').value = data.macs.join('\n');
+    
+    // For large lists (>10000), don't show all MACs in textarea to avoid browser freeze
+    if (data.count > 10000) {
+        document.getElementById('mac-list-textarea').value = 
+            `# ${data.count} MACs loaded (too many to display)\n` +
+            `# First 100 MACs:\n` +
+            data.macs.slice(0, 100).join('\n') +
+            `\n\n# ... and ${data.count - 100} more`;
+    } else {
+        document.getElementById('mac-list-textarea').value = data.macs.join('\n');
+    }
+    
     document.getElementById('maclist-count').textContent = data.count;
     document.getElementById('mac-list-count').textContent = data.count;
 }
@@ -705,12 +728,7 @@ document.getElementById('btn-save-sources').addEventListener('click', async () =
 });
 
 document.getElementById('btn-fetch-proxies').addEventListener('click', async () => {
-    const proxyType = document.getElementById('proxy-source-type').value;
-    await fetch('/api/proxies/fetch', { 
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ proxy_type: proxyType })
-    });
+    await fetch('/api/proxies/fetch', { method: 'POST' });
     startProxyPolling();
 });
 

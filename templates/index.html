@@ -263,18 +263,9 @@
 
             <div class="panel">
                 <h2>Custom Proxy Sources</h2>
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Proxy Type for fetched sources:</label>
-                        <select id="proxy-source-type">
-                            <option value="http">HTTP (default)</option>
-                            <option value="socks4">SOCKS4</option>
-                            <option value="socks5">SOCKS5</option>
-                        </select>
-                    </div>
-                </div>
                 <div class="help-text">
-                    Add your own proxy list URLs. The selected type will be applied to all fetched proxies (ip:port format).
+                    Add your own proxy list URLs. Proxies will be fetched as ip:port format.<br>
+                    Use "Test & Auto-Detect" after fetching to determine the correct proxy type.
                 </div>
                 <textarea id="proxy-sources" placeholder="Enter proxy source URLs (one per line)&#10;https://example.com/proxy-list.txt"></textarea>
                 <button id="btn-save-sources" class="btn btn-success">Save Sources</button>
