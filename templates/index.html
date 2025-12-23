@@ -3,230 +3,203 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MacAttack Web Interface</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body {
-            background-color: #2e2e2e;
-            color: white;
-            font-family: Arial, sans-serif;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #444;
-        }
-        .logo {
-            font-size: 24px;
-            font-weight: bold;
-            color: #1e90ff;
-        }
-        .control-panel {
-            background-color: #444;
-            border-radius: 5px;
-            padding: 15px;
-            margin-bottom: 20px;
-        }
-        .btn-primary {
-            background-color: #1e90ff;
-            border: none;
-            padding: 8px 20px;
-            margin: 5px;
-        }
-        .btn-danger {
-            background-color: #dc3545;
-            border: none;
-            padding: 8px 20px;
-            margin: 5px;
-        }
-        .status-panel {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 20px;
-        }
-        .status-box {
-            background-color: #444;
-            border-radius: 5px;
-            padding: 15px;
-            flex: 1;
-            margin: 0 5px;
-        }
-        .status-title {
-            font-size: 14px;
-            color: #aaa;
-            margin-bottom: 5px;
-        }
-        .status-value {
-            font-size: 18px;
-            font-weight: bold;
-        }
-        .log-panel {
-            background-color: #1e1e1e;
-            border-radius: 5px;
-            padding: 15px;
-            height: 300px;
-            overflow-y: auto;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-            margin-bottom: 20px;
-        }
-        .log-entry {
-            margin: 2px 0;
-            padding: 2px 5px;
-            border-left: 3px solid #1e90ff;
-        }
-        .error-entry {
-            color: #ff6b6b;
-            border-left-color: #ff6b6b;
-        }
-        .tab-content {
-            margin-top: 20px;
-        }
-        .nav-tabs .nav-link {
-            color: #aaa;
-            background-color: #444;
-            border: none;
-            margin-right: 5px;
-        }
-        .nav-tabs .nav-link.active {
-            color: white;
-            background-color: #1e90ff;
-            border: none;
-        }
-    </style>
+    <title>MacAttack-Web</title>
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
-        <div class="header">
-            <div class="logo">MacAttack Web Interface</div>
-            <div id="connection-status" class="badge bg-success">Connected</div>
+        <header>
+            <h1>🎯 MacAttack-Web</h1>
+            <span class="version">v{{ version }}</span>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-btn active" data-tab="attack">Mac Attack</button>
+            <button class="tab-btn" data-tab="player">Mac Player</button>
+            <button class="tab-btn" data-tab="proxies">Proxies</button>
+            <button class="tab-btn" data-tab="found">Found MACs</button>
+            <button class="tab-btn" data-tab="settings">Settings</button>
+        </nav>
+
+        <!-- MAC ATTACK TAB -->
+        <div id="attack" class="tab-content active">
+            <div class="panel">
+                <h2>Portal Configuration</h2>
+                <div class="form-group">
+                    <label>Portal URL:</label>
+                    <input type="text" id="attack-url" placeholder="http://example.com/c/">
+                </div>
+                <div class="button-group">
+                    <button id="btn-start" class="btn btn-success">▶ Start</button>
+                    <button id="btn-pause" class="btn btn-warning" disabled>⏸ Pause</button>
+                    <button id="btn-stop" class="btn btn-danger" disabled>⏹ Stop</button>
+                </div>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <span class="stat-label">Tested</span>
+                    <span class="stat-value" id="stat-tested">0</span>
+                </div>
+                <div class="stat-card success">
+                    <span class="stat-label">Hits</span>
+                    <span class="stat-value" id="stat-hits">0</span>
+                </div>
+                <div class="stat-card error">
+                    <span class="stat-label">Errors</span>
+                    <span class="stat-value" id="stat-errors">0</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-label">Time</span>
+                    <span class="stat-value" id="stat-time">00:00</span>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Current MAC: <span id="current-mac">-</span></h2>
+            </div>
+
+            <div class="two-columns">
+                <div class="panel">
+                    <h2>Found MACs</h2>
+                    <div class="log-box" id="found-list"></div>
+                </div>
+                <div class="panel">
+                    <h2>Log</h2>
+                    <div class="log-box" id="attack-log"></div>
+                </div>
+            </div>
         </div>
 
-        <div class="control-panel">
-            <h5>Control Panel</h5>
-            <div class="d-flex flex-wrap">
-                <button id="start-btn" class="btn btn-primary">Start Attack</button>
-                <button id="stop-btn" class="btn btn-danger" disabled>Stop Attack</button>
+        <!-- MAC PLAYER TAB -->
+        <div id="player" class="tab-content">
+            <div class="panel">
+                <h2>Portal Connection</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Portal URL:</label>
+                        <input type="text" id="player-url" placeholder="http://example.com/c/">
+                    </div>
+                    <div class="form-group">
+                        <label>MAC Address:</label>
+                        <input type="text" id="player-mac" placeholder="00:1A:79:XX:XX:XX">
+                    </div>
+                    <div class="form-group">
+                        <label>Proxy (optional):</label>
+                        <input type="text" id="player-proxy" placeholder="ip:port">
+                    </div>
+                </div>
+                <button id="btn-connect" class="btn btn-primary">Connect</button>
+            </div>
+
+            <div class="two-columns">
+                <div class="panel">
+                    <h2>Categories</h2>
+                    <div class="category-tabs">
+                        <button class="cat-btn active" data-cat="live">Live</button>
+                        <button class="cat-btn" data-cat="vod">Movies</button>
+                        <button class="cat-btn" data-cat="series">Series</button>
+                    </div>
+                    <div class="list-box" id="category-list"></div>
+                </div>
+                <div class="panel">
+                    <h2>Channels</h2>
+                    <div class="list-box" id="channel-list"></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>Stream URL</h2>
+                <div class="stream-url-box">
+                    <input type="text" id="stream-url" readonly placeholder="Select a channel to get stream URL">
+                    <button id="btn-copy-url" class="btn btn-secondary">Copy</button>
+                </div>
             </div>
         </div>
 
-        <div class="status-panel">
-            <div class="status-box">
-                <div class="status-title">Current MAC</div>
-                <div id="current-mac" class="status-value">00:00:00:00:00:00</div>
+        <!-- PROXIES TAB -->
+        <div id="proxies" class="tab-content">
+            <div class="panel">
+                <h2>Proxy Management</h2>
+                <div class="button-group">
+                    <button id="btn-fetch-proxies" class="btn btn-primary">Fetch Proxies</button>
+                    <button id="btn-test-proxies" class="btn btn-warning">Test Proxies</button>
+                    <button id="btn-clear-proxies" class="btn btn-danger">Clear</button>
+                </div>
             </div>
-            <div class="status-box">
-                <div class="status-title">Hits</div>
-                <div id="hits-count" class="status-value">0</div>
-            </div>
-            <div class="status-box">
-                <div class="status-title">Status</div>
-                <div id="status-text" class="status-value">Ready</div>
+
+            <div class="two-columns">
+                <div class="panel">
+                    <h2>Proxies (<span id="proxy-count">0</span>)</h2>
+                    <textarea id="proxy-list" placeholder="Enter proxies (one per line)&#10;Format: ip:port"></textarea>
+                    <button id="btn-save-proxies" class="btn btn-success">Save Proxies</button>
+                </div>
+                <div class="panel">
+                    <h2>Log</h2>
+                    <div class="log-box" id="proxy-log"></div>
+                </div>
             </div>
         </div>
 
-        <ul class="nav nav-tabs" id="myTab" role="tablist">
-            <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="output-tab" data-bs-toggle="tab" data-bs-target="#output" type="button" role="tab">Output</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="errors-tab" data-bs-toggle="tab" data-bs-target="#errors" type="button" role="tab">Errors</button>
-            </li>
-        </ul>
-        <div class="tab-content" id="myTabContent">
-            <div class="tab-pane fade show active" id="output" role="tabpanel">
-                <div id="output-log" class="log-panel"></div>
+        <!-- FOUND MACS TAB -->
+        <div id="found" class="tab-content">
+            <div class="panel">
+                <h2>Found MAC Addresses</h2>
+                <div class="button-group">
+                    <button id="btn-export-txt" class="btn btn-primary">Export TXT</button>
+                    <button id="btn-export-json" class="btn btn-secondary">Export JSON</button>
+                    <button id="btn-clear-found" class="btn btn-danger">Clear All</button>
+                </div>
             </div>
-            <div class="tab-pane fade" id="errors" role="tabpanel">
-                <div id="error-log" class="log-panel"></div>
+
+            <div class="panel">
+                <table id="found-table">
+                    <thead>
+                        <tr>
+                            <th>MAC Address</th>
+                            <th>Expiry</th>
+                            <th>Portal</th>
+                            <th>Found At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="found-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- SETTINGS TAB -->
+        <div id="settings" class="tab-content">
+            <div class="panel">
+                <h2>Attack Settings</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Speed (threads):</label>
+                        <input type="number" id="setting-speed" min="1" max="100" value="10">
+                    </div>
+                    <div class="form-group">
+                        <label>Timeout (seconds):</label>
+                        <input type="number" id="setting-timeout" min="1" max="60" value="10">
+                    </div>
+                    <div class="form-group">
+                        <label>MAC Prefix:</label>
+                        <input type="text" id="setting-prefix" value="00:1A:79:">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="setting-use-proxies">
+                        <label for="setting-use-proxies">Use Proxies</label>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="setting-auto-save" checked>
+                        <label for="setting-auto-save">Auto-save found MACs</label>
+                    </div>
+                </div>
+                <button id="btn-save-settings" class="btn btn-success">Save Settings</button>
             </div>
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
-    <script>
-        // Connect to the WebSocket server
-        const socket = io();
-        
-        // DOM elements
-        const startBtn = document.getElementById('start-btn');
-        const stopBtn = document.getElementById('stop-btn');
-        const currentMac = document.getElementById('current-mac');
-        const hitsCount = document.getElementById('hits-count');
-        const statusText = document.getElementById('status-text');
-        const outputLog = document.getElementById('output-log');
-        const errorLog = document.getElementById('error-log');
-        const connectionStatus = document.getElementById('connection-status');
-
-        // Connection status
-        socket.on('connect', () => {
-            console.log('Connected to server');
-            connectionStatus.textContent = 'Connected';
-            connectionStatus.className = 'badge bg-success';
-        });
-
-        socket.on('disconnect', () => {
-            console.log('Disconnected from server');
-            connectionStatus.textContent = 'Disconnected';
-            connectionStatus.className = 'badge bg-danger';
-        });
-
-        // Handle start button click
-        startBtn.addEventListener('click', () => {
-            socket.emit('start_attack');
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            statusText.textContent = 'Running...';
-        });
-
-        // Handle stop button click
-        stopBtn.addEventListener('click', () => {
-            socket.emit('stop_attack');
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            statusText.textContent = 'Stopped';
-        });
-
-        // Handle incoming updates
-        socket.on('mac_update', (data) => {
-            currentMac.textContent = data.text;
-        });
-
-        socket.on('hits_update', (data) => {
-            hitsCount.textContent = data.text;
-        });
-
-        socket.on('output_update', (data) => {
-            const entry = document.createElement('div');
-            entry.className = 'log-entry';
-            entry.textContent = data.text;
-            outputLog.appendChild(entry);
-            outputLog.scrollTop = outputLog.scrollHeight;
-        });
-
-        socket.on('error_update', (data) => {
-            const entry = document.createElement('div');
-            entry.className = 'log-entry error-entry';
-            entry.textContent = data.text;
-            errorLog.appendChild(entry);
-            errorLog.scrollTop = errorLog.scrollHeight;
-        });
-
-        // Handle window resize
-        window.addEventListener('resize', () => {
-            // Auto-scroll logs to bottom on resize
-            outputLog.scrollTop = outputLog.scrollHeight;
-            errorLog.scrollTop = errorLog.scrollHeight;
-        });
-    </script>
+    <script src="/static/app.js"></script>
 </body>
 </html>

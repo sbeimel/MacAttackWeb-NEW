@@ -1,21 +1,22 @@
-version: '3.8'
-
 services:
-  macattack:
+  macattack-web:
     build: .
-    container_name: macattack
-    restart: unless-stopped
+    container_name: MacAttack-Web
     ports:
-      - "5000:5000"  # Web interface
-      - "5900:5900"  # VNC for debugging (optional)
+      - "8080:8080"
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
     volumes:
-      - ./config:/root/.config/vlc  # Persist VLC configuration
+      - ./data:/app/data
+      - ./logs:/app/logs
     environment:
-      - DISPLAY=:1
-      - VLC_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/vlc/plugins
-    cap_add:
-      - SYS_ADMIN  # Required for Xvfb
-    devices:
-      - /dev/dri:/dev/dri  # For hardware acceleration (if available)
-    shm_size: '2gb'  # Increase shared memory for Xvfb
-    tty: true  # Keep container running
+      - HOST=0.0.0.0:8080
+      - CONFIG=/app/data/macattack.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
