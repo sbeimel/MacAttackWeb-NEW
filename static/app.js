@@ -20,7 +20,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
         if (btn.dataset.tab === 'portals') loadPortals();
         if (btn.dataset.tab === 'maclist') loadMacList();
         if (btn.dataset.tab === 'found') loadFoundMacs();
-        if (btn.dataset.tab === 'proxies') loadProxySources();
+        if (btn.dataset.tab === 'proxies') { loadProxySources(); loadProxyList(); }
     });
 });
 
@@ -44,6 +44,12 @@ async function loadMacListCount() {
     document.getElementById('mac-list-count').textContent = data.count;
 }
 
+async function loadFoundMacCount() {
+    const res = await fetch('/api/found');
+    const data = await res.json();
+    document.getElementById('found-mac-count').textContent = data.length;
+}
+
 document.getElementById('attack-portal-select').addEventListener('change', (e) => {
     if (e.target.value) document.getElementById('attack-url').value = e.target.value;
 });
@@ -54,6 +60,23 @@ document.getElementById('btn-start').addEventListener('click', async () => {
     const mode = document.querySelector('input[name="attack-mode"]:checked').value;
     
     if (!url) { alert('Please enter a portal URL'); return; }
+    
+    // Check if refresh mode - get MACs for this portal
+    if (mode === 'refresh') {
+        const foundRes = await fetch('/api/found');
+        const foundMacs = await foundRes.json();
+        const portalMacs = foundMacs.filter(m => {
+            // Match portal URL (normalize both)
+            const macPortal = (m.portal || '').replace(/\/+$/, '').toLowerCase();
+            const targetPortal = url.replace(/\/+$/, '').toLowerCase();
+            return macPortal === targetPortal || macPortal.includes(targetPortal) || targetPortal.includes(macPortal);
+        });
+        
+        if (portalMacs.length === 0) {
+            alert('No found MACs for this portal. Use a different mode or select a portal with found MACs.');
+            return;
+        }
+    }
     
     // Check if MAC list mode but no MACs
     if (mode === 'list') {
@@ -232,6 +255,7 @@ function updateSelectedAttack(attack) {
 
 loadPortalSelect();
 loadMacListCount();
+loadFoundMacCount();
 startStatusPolling();
 
 
@@ -581,14 +605,87 @@ document.getElementById('btn-clear-maclist').addEventListener('click', async () 
     }
 });
 
+// Show file info when selected
+document.getElementById('mac-file-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    const fileInfo = document.getElementById('file-info');
+    if (file) {
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+        fileInfo.textContent = `(${file.name} - ${sizeMB} MB)`;
+    } else {
+        fileInfo.textContent = '';
+    }
+});
+
 document.getElementById('btn-import-file').addEventListener('click', async () => {
     const fileInput = document.getElementById('mac-file-input');
     if (!fileInput.files.length) { alert('Select file'); return; }
-    const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
-    const res = await fetch('/api/maclist/import', { method: 'POST', body: formData });
-    const data = await res.json();
-    if (data.success) { loadMacList(); alert(`Imported ${data.count} MACs`); }
+    
+    const file = fileInput.files[0];
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    
+    // Show progress
+    const progressDiv = document.getElementById('import-progress');
+    const progressBar = document.getElementById('import-progress-bar');
+    const statusDiv = document.getElementById('import-status');
+    const btn = document.getElementById('btn-import-file');
+    
+    progressDiv.style.display = 'block';
+    progressBar.style.width = '0%';
+    statusDiv.textContent = `Uploading ${file.name} (${sizeMB} MB)...`;
+    btn.disabled = true;
+    btn.textContent = 'Importing...';
+    
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        // Use XMLHttpRequest for progress tracking
+        const xhr = new XMLHttpRequest();
+        
+        xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 100);
+                progressBar.style.width = percent + '%';
+                statusDiv.textContent = `Uploading: ${percent}%`;
+            }
+        });
+        
+        const response = await new Promise((resolve, reject) => {
+            xhr.onload = () => {
+                if (xhr.status === 200) {
+                    resolve(JSON.parse(xhr.responseText));
+                } else {
+                    reject(new Error('Upload failed'));
+                }
+            };
+            xhr.onerror = () => reject(new Error('Upload failed'));
+            xhr.open('POST', '/api/maclist/import');
+            xhr.send(formData);
+            
+            statusDiv.textContent = 'Processing MACs...';
+            progressBar.style.width = '100%';
+        });
+        
+        if (response.success) {
+            loadMacList();
+            loadFoundMacCount();
+            let msg = `✅ Imported ${response.count} MACs`;
+            if (response.duplicates > 0) msg += `\n⚠️ ${response.duplicates} duplicates removed`;
+            if (response.invalid > 0) msg += `\n❌ ${response.invalid} invalid lines skipped`;
+            alert(msg);
+        } else {
+            alert('Error: ' + (response.error || 'Import failed'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Import from File';
+        setTimeout(() => {
+            progressDiv.style.display = 'none';
+        }, 2000);
+    }
 });
 
 // ============== PROXIES TAB ==============
@@ -608,13 +705,34 @@ document.getElementById('btn-save-sources').addEventListener('click', async () =
 });
 
 document.getElementById('btn-fetch-proxies').addEventListener('click', async () => {
-    await fetch('/api/proxies/fetch', { method: 'POST' });
+    const proxyType = document.getElementById('proxy-source-type').value;
+    await fetch('/api/proxies/fetch', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy_type: proxyType })
+    });
     startProxyPolling();
 });
 
 document.getElementById('btn-test-proxies').addEventListener('click', async () => {
     await fetch('/api/proxies/test', { method: 'POST' });
     startProxyPolling();
+});
+
+document.getElementById('btn-test-autodetect').addEventListener('click', async () => {
+    await fetch('/api/proxies/test-autodetect', { method: 'POST' });
+    startProxyPolling();
+});
+
+document.getElementById('btn-remove-failed').addEventListener('click', async () => {
+    const res = await fetch('/api/proxies/remove-failed', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+        alert(`Removed ${data.removed} failed proxies. ${data.remaining} remaining.`);
+        loadProxyList();
+    } else {
+        alert(data.error || 'No failed proxies to remove');
+    }
 });
 
 document.getElementById('btn-reset-errors').addEventListener('click', async () => {
@@ -630,9 +748,26 @@ document.getElementById('btn-clear-proxies').addEventListener('click', async () 
 
 document.getElementById('btn-save-proxies').addEventListener('click', async () => {
     const proxies = document.getElementById('proxy-list').value;
-    await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxies }) });
-    alert('Proxies saved!');
+    const res = await fetch('/api/proxies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxies }) });
+    const data = await res.json();
+    if (data.success) {
+        document.getElementById('proxy-count').textContent = data.count || 0;
+        alert('Proxies saved!');
+    }
 });
+
+// Load proxy list from server
+async function loadProxyList() {
+    const res = await fetch('/api/proxies');
+    const data = await res.json();
+    if (data.proxies && data.proxies.length > 0) {
+        document.getElementById('proxy-list').value = data.proxies.join('\n');
+        document.getElementById('proxy-count').textContent = data.proxies.length;
+    } else {
+        document.getElementById('proxy-list').value = '';
+        document.getElementById('proxy-count').textContent = '0';
+    }
+}
 
 // Import proxies with auto-prefix
 document.getElementById('btn-import-proxies').addEventListener('click', async () => {
@@ -827,3 +962,82 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
     document.getElementById('setting-use-proxies').checked = s.use_proxies || false;
     document.getElementById('setting-auto-save').checked = s.auto_save !== false;
 })();
+
+// ============== AUTHENTICATION ==============
+
+async function loadAuthStatus() {
+    try {
+        const res = await fetch('/api/auth/status');
+        const data = await res.json();
+        const statusEl = document.getElementById('auth-status');
+        
+        if (data.enabled) {
+            statusEl.innerHTML = '<div class="help-text" style="color: #28a745;">✅ Authentication is enabled</div>';
+        } else {
+            statusEl.innerHTML = '<div class="help-text" style="color: #ffc107;">⚠️ Authentication is disabled - anyone can access this interface</div>';
+        }
+    } catch (e) {
+        console.error('Error loading auth status:', e);
+    }
+}
+
+document.getElementById('btn-update-auth').addEventListener('click', async () => {
+    const username = document.getElementById('auth-username').value.trim();
+    const password = document.getElementById('auth-password').value;
+    
+    if (!username || !password) {
+        alert('Please enter both username and password');
+        return;
+    }
+    
+    if (password.length < 4) {
+        alert('Password must be at least 4 characters');
+        return;
+    }
+    
+    try {
+        const res = await fetch('/api/auth/change', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'change', username, password })
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+            alert('Credentials updated! You may need to log in again.');
+            document.getElementById('auth-username').value = '';
+            document.getElementById('auth-password').value = '';
+            loadAuthStatus();
+        } else {
+            alert('Error: ' + data.error);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+});
+
+document.getElementById('btn-disable-auth').addEventListener('click', async () => {
+    if (!confirm('Are you sure you want to disable authentication? Anyone with access to this URL will be able to use MacAttack-Web.')) {
+        return;
+    }
+    
+    try {
+        const res = await fetch('/api/auth/change', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'disable' })
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+            alert('Authentication disabled');
+            loadAuthStatus();
+        } else {
+            alert('Error: ' + data.error);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+});
+
+loadAuthStatus();

@@ -46,6 +46,7 @@
                     <div class="radio-group">
                         <label><input type="radio" name="attack-mode" value="random" checked> Random MAC Generation</label>
                         <label><input type="radio" name="attack-mode" value="list"> Use MAC List (<span id="mac-list-count">0</span> MACs)</label>
+                        <label><input type="radio" name="attack-mode" value="refresh"> Refresh Found MACs (<span id="found-mac-count">0</span> MACs)</label>
                     </div>
                 </div>
                 <div class="button-group">
@@ -217,11 +218,18 @@
                 <h2>Import MAC List</h2>
                 <div class="help-text">
                     Import a list of MAC addresses to test. One MAC per line.<br>
-                    <strong>Supported formats:</strong> 00:1A:79:XX:XX:XX, 00-1A-79-XX-XX-XX
+                    <strong>Supported formats:</strong> 00:1A:79:XX:XX:XX, 00-1A-79-XX-XX-XX<br>
+                    <strong>Max file size:</strong> 100 MB
                 </div>
                 <div class="form-group">
-                    <label>Upload File:</label>
+                    <label>Upload File: <span id="file-info" style="color: var(--text-secondary);"></span></label>
                     <input type="file" id="mac-file-input" accept=".txt,.csv">
+                </div>
+                <div id="import-progress" style="display: none; margin-bottom: 15px;">
+                    <div style="background: var(--bg-tertiary); border-radius: 4px; overflow: hidden;">
+                        <div id="import-progress-bar" style="height: 20px; background: var(--accent); width: 0%; transition: width 0.3s;"></div>
+                    </div>
+                    <div id="import-status" style="margin-top: 5px; color: var(--text-secondary);"></div>
                 </div>
                 <button id="btn-import-file" class="btn btn-primary">Import from File</button>
             </div>
@@ -246,15 +254,27 @@
                 <div class="button-group">
                     <button id="btn-fetch-proxies" class="btn btn-primary">Fetch Proxies</button>
                     <button id="btn-test-proxies" class="btn btn-warning">Test Proxies</button>
+                    <button id="btn-test-autodetect" class="btn btn-info" title="Tests each proxy as HTTP, then SOCKS5, then SOCKS4 and updates the type">Test & Auto-Detect</button>
+                    <button id="btn-remove-failed" class="btn btn-danger" title="Remove proxies that failed the last test">Remove Failed</button>
                     <button id="btn-reset-errors" class="btn btn-secondary">Reset Errors</button>
-                    <button id="btn-clear-proxies" class="btn btn-danger">Clear</button>
+                    <button id="btn-clear-proxies" class="btn btn-danger">Clear All</button>
                 </div>
             </div>
 
             <div class="panel">
                 <h2>Custom Proxy Sources</h2>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Proxy Type for fetched sources:</label>
+                        <select id="proxy-source-type">
+                            <option value="http">HTTP (default)</option>
+                            <option value="socks4">SOCKS4</option>
+                            <option value="socks5">SOCKS5</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="help-text">
-                    Add your own proxy list URLs. These will be fetched when you click "Fetch Proxies".
+                    Add your own proxy list URLs. The selected type will be applied to all fetched proxies (ip:port format).
                 </div>
                 <textarea id="proxy-sources" placeholder="Enter proxy source URLs (one per line)&#10;https://example.com/proxy-list.txt"></textarea>
                 <button id="btn-save-sources" class="btn btn-success">Save Sources</button>
@@ -352,6 +372,25 @@
                     </div>
                 </div>
                 <button id="btn-save-settings" class="btn btn-success">Save Settings</button>
+            </div>
+
+            <div class="panel">
+                <h2>Authentication</h2>
+                <div id="auth-status"></div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Username:</label>
+                        <input type="text" id="auth-username" placeholder="admin">
+                    </div>
+                    <div class="form-group">
+                        <label>New Password:</label>
+                        <input type="password" id="auth-password" placeholder="Enter new password">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button id="btn-update-auth" class="btn btn-primary">Update Credentials</button>
+                    <button id="btn-disable-auth" class="btn btn-warning">Disable Authentication</button>
+                </div>
             </div>
         </div>
     </div>

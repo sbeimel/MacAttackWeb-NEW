@@ -65,6 +65,7 @@ header h1 { font-size: 2rem; }
 .btn-warning { background: var(--warning); color: #333; }
 .btn-danger { background: var(--error); color: white; }
 .btn-secondary { background: var(--bg-input); color: var(--text-primary); }
+.btn-info { background: #17a2b8; color: white; }
 .btn:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.1); }
 .button-group { display: flex; gap: 10px; flex-wrap: wrap; }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 20px; }

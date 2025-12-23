@@ -11,7 +11,9 @@ import time
 import threading
 import secrets
 import re
+import hashlib
 from datetime import datetime
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from collections import defaultdict
@@ -22,7 +24,7 @@ import waitress
 
 import stb
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # Logging setup
 logger = logging.getLogger("MacAttack")
@@ -50,6 +52,7 @@ logger.addHandler(consoleHandler)
 
 app = Flask(__name__)
 app.secret_key = secrets.token_urlsafe(32)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max upload
 
 host = os.getenv("HOST", "0.0.0.0:5002")
 logger.info(f"Server will start on http://{host}")
@@ -95,6 +98,43 @@ DEFAULT_PROXY_SOURCES = [
 ]
 
 
+# ============== BASIC AUTH ==============
+
+def hash_password(password):
+    """Hash password with SHA256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def check_auth(username, password):
+    """Check if username/password combination is valid."""
+    auth = config.get("auth", {})
+    if not auth.get("enabled", False):
+        return True
+    
+    stored_user = auth.get("username", "")
+    stored_hash = auth.get("password_hash", "")
+    
+    return username == stored_user and hash_password(password) == stored_hash
+
+
+def requires_auth(f):
+    """Decorator for routes that require authentication."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = config.get("auth", {})
+        if not auth.get("enabled", False):
+            return f(*args, **kwargs)
+        
+        request_auth = request.authorization
+        if not request_auth or not check_auth(request_auth.username, request_auth.password):
+            return Response(
+                'Authentication required', 401,
+                {'WWW-Authenticate': 'Basic realm="MacAttack-Web"'}
+            )
+        return f(*args, **kwargs)
+    return decorated
+
+
 def load_config():
     global config
     try:
@@ -114,6 +154,7 @@ def load_config():
     config.setdefault("portals", [])
     config.setdefault("mac_list", [])
     config.setdefault("proxy_sources", DEFAULT_PROXY_SOURCES.copy())
+    config.setdefault("auth", {"enabled": False, "username": "", "password_hash": ""})
     
     for key, default in defaultSettings.items():
         config["settings"].setdefault(key, default)
@@ -197,11 +238,96 @@ def no_proxy_environment():
 # ============== ROUTES ==============
 
 @app.route("/")
+@requires_auth
 def index():
+    # Check if auth needs to be set up
+    auth = config.get("auth", {})
+    if not auth.get("enabled", False) and not auth.get("setup_skipped", False):
+        return render_template("setup.html", version=VERSION)
     return render_template("index.html", version=VERSION)
 
 
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    """Initial setup page for creating admin credentials."""
+    auth = config.get("auth", {})
+    
+    # If already set up, redirect to main page
+    if auth.get("enabled", False):
+        return Response("Already configured", 302, {"Location": "/"})
+    
+    if request.method == "POST":
+        data = request.json or request.form
+        username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
+        skip = data.get("skip", False)
+        
+        if skip:
+            config["auth"] = {"enabled": False, "setup_skipped": True}
+            save_config()
+            logger.info("Auth setup skipped - no authentication enabled")
+            return jsonify({"success": True, "message": "Setup skipped"})
+        
+        if not username or not password:
+            return jsonify({"success": False, "error": "Username and password required"})
+        
+        if len(password) < 4:
+            return jsonify({"success": False, "error": "Password must be at least 4 characters"})
+        
+        config["auth"] = {
+            "enabled": True,
+            "username": username,
+            "password_hash": hash_password(password)
+        }
+        save_config()
+        logger.info(f"Auth configured for user: {username}")
+        return jsonify({"success": True, "message": "Authentication configured"})
+    
+    return render_template("setup.html", version=VERSION)
+
+
+@app.route("/api/auth/status")
+def api_auth_status():
+    """Check authentication status."""
+    auth = config.get("auth", {})
+    return jsonify({
+        "enabled": auth.get("enabled", False),
+        "setup_required": not auth.get("enabled", False) and not auth.get("setup_skipped", False)
+    })
+
+
+@app.route("/api/auth/change", methods=["POST"])
+@requires_auth
+def api_auth_change():
+    """Change password or disable auth."""
+    data = request.json
+    action = data.get("action", "")
+    
+    if action == "disable":
+        config["auth"] = {"enabled": False, "setup_skipped": True}
+        save_config()
+        return jsonify({"success": True, "message": "Authentication disabled"})
+    
+    if action == "change":
+        username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
+        
+        if not username or not password:
+            return jsonify({"success": False, "error": "Username and password required"})
+        
+        config["auth"] = {
+            "enabled": True,
+            "username": username,
+            "password_hash": hash_password(password)
+        }
+        save_config()
+        return jsonify({"success": True, "message": "Credentials updated"})
+    
+    return jsonify({"success": False, "error": "Invalid action"})
+
+
 @app.route("/api/settings", methods=["GET", "POST"])
+@requires_auth
 def api_settings():
     if request.method == "GET":
         return jsonify(get_settings())
@@ -219,6 +345,7 @@ def api_settings():
 # ============== PORTALS MANAGEMENT ==============
 
 @app.route("/api/portals", methods=["GET", "POST"])
+@requires_auth
 def api_portals():
     if request.method == "GET":
         return jsonify(config.get("portals", []))
@@ -243,6 +370,7 @@ def api_portals():
 
 
 @app.route("/api/portals/<portal_id>", methods=["PUT", "DELETE"])
+@requires_auth
 def api_portal_manage(portal_id):
     portals = config.get("portals", [])
     
@@ -266,6 +394,7 @@ def api_portal_manage(portal_id):
 # ============== MAC LIST MANAGEMENT ==============
 
 @app.route("/api/maclist", methods=["GET", "POST", "DELETE"])
+@requires_auth
 def api_maclist():
     if request.method == "GET":
         return jsonify({"macs": config.get("mac_list", []), "count": len(config.get("mac_list", []))})
@@ -291,24 +420,47 @@ def api_maclist():
 
 
 @app.route("/api/maclist/import", methods=["POST"])
+@requires_auth
 def api_maclist_import():
     if "file" not in request.files:
         return jsonify({"success": False, "error": "No file uploaded"})
     
     file = request.files["file"]
+    file_size = file.content_length or 0
+    
+    # Read file content
     content = file.read().decode("utf-8", errors="ignore")
+    total_lines = content.count('\n') + 1
     
     macs = []
+    duplicates = 0
+    invalid = 0
+    
     for line in content.strip().split("\n"):
         mac = line.strip().upper()
         if mac and len(mac) >= 11:
             mac = mac.replace("-", ":").replace(".", ":")
-            if mac not in macs:
-                macs.append(mac)
+            # Basic MAC format validation
+            if len(mac) == 17 and mac.count(':') == 5:
+                if mac not in macs:
+                    macs.append(mac)
+                else:
+                    duplicates += 1
+            else:
+                invalid += 1
+        elif mac:
+            invalid += 1
     
     config["mac_list"] = macs
     save_config()
-    return jsonify({"success": True, "count": len(macs)})
+    
+    return jsonify({
+        "success": True, 
+        "count": len(macs),
+        "total_lines": total_lines,
+        "duplicates": duplicates,
+        "invalid": invalid
+    })
 
 
 # ============== MULTI-PORTAL ATTACK ==============
@@ -335,6 +487,7 @@ def create_attack_state(portal_id, portal_url, mode="random"):
 
 
 @app.route("/api/attack/start", methods=["POST"])
+@requires_auth
 def api_attack_start():
     """Start attack on one or multiple portals."""
     data = request.json
@@ -351,6 +504,12 @@ def api_attack_start():
     
     if mode == "list" and not config.get("mac_list"):
         return jsonify({"success": False, "error": "MAC list is empty"})
+    
+    # For refresh mode, check if there are found MACs for the portal(s)
+    if mode == "refresh":
+        found_macs = config.get("found_macs", [])
+        if not found_macs:
+            return jsonify({"success": False, "error": "No found MACs to refresh"})
     
     started = []
     for url in portal_urls:
@@ -379,6 +538,7 @@ def api_attack_start():
 
 
 @app.route("/api/attack/stop", methods=["POST"])
+@requires_auth
 def api_attack_stop():
     """Stop attack(s)."""
     data = request.json
@@ -398,6 +558,7 @@ def api_attack_stop():
 
 
 @app.route("/api/attack/pause", methods=["POST"])
+@requires_auth
 def api_attack_pause():
     data = request.json
     portal_id = data.get("id")
@@ -413,6 +574,7 @@ def api_attack_pause():
 
 
 @app.route("/api/attack/status")
+@requires_auth
 def api_attack_status():
     """Get status of all running attacks."""
     portal_id = request.args.get("id")
@@ -463,6 +625,7 @@ def api_attack_status():
 
 
 @app.route("/api/attack/clear", methods=["POST"])
+@requires_auth
 def api_attack_clear():
     """Clear finished attacks from list."""
     with attack_states_lock:
@@ -492,7 +655,24 @@ def run_attack(portal_id):
     
     proxies = config.get("proxies", []) if use_proxies else []
     proxy_index = 0
-    mac_list = config.get("mac_list", []) if mode == "list" else []
+    
+    # Build MAC list based on mode
+    if mode == "list":
+        mac_list = config.get("mac_list", [])
+    elif mode == "refresh":
+        # Get MACs from found_macs that match this portal
+        found_macs = config.get("found_macs", [])
+        portal_normalized = portal_url.rstrip('/').lower()
+        mac_list = []
+        for m in found_macs:
+            mac_portal = (m.get("portal") or "").rstrip('/').lower()
+            # Match if portals are similar (handle slight URL differences)
+            if mac_portal == portal_normalized or portal_normalized in mac_portal or mac_portal in portal_normalized:
+                mac_list.append(m.get("mac"))
+        mac_list = [m for m in mac_list if m]  # Remove empty
+    else:
+        mac_list = []
+    
     mac_list_index = 0
     
     # Log mode and MAC list info
@@ -502,6 +682,13 @@ def run_attack(portal_id):
         state["mac_list_total"] = len(mac_list)
         if len(mac_list) == 0:
             add_log(state, "WARNING: MAC list is empty!", "warning")
+            state["running"] = False
+            return
+    elif mode == "refresh":
+        add_log(state, f"Refreshing {len(mac_list)} found MACs for this portal", "info")
+        state["mac_list_total"] = len(mac_list)
+        if len(mac_list) == 0:
+            add_log(state, "WARNING: No found MACs for this portal!", "warning")
             state["running"] = False
             return
     else:
@@ -523,8 +710,8 @@ def run_attack(portal_id):
             if not state["running"]:
                 break
             
-            # Check if we should stop adding new MACs
-            if mode == "list" and mac_list_index >= len(mac_list):
+            # Check if we should stop adding new MACs (list or refresh mode)
+            if mode in ("list", "refresh") and mac_list_index >= len(mac_list):
                 if not list_exhausted:
                     add_log(state, f"MAC list exhausted ({mac_list_index} submitted). Waiting for results...", "info")
                     list_exhausted = True
@@ -536,7 +723,7 @@ def run_attack(portal_id):
             # Add new MACs to test (only if list not exhausted or random mode)
             if not list_exhausted:
                 while len(futures) < speed and state["running"]:
-                    if mode == "list":
+                    if mode in ("list", "refresh"):
                         if mac_list_index >= len(mac_list):
                             break
                         mac = mac_list[mac_list_index]
@@ -549,6 +736,7 @@ def run_attack(portal_id):
                     if proxies:
                         working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
                         if not working_proxies:
+                            add_log(state, f"⚠ All proxies failed! Resetting error counts and retrying...", "warning")
                             proxy_error_counts.clear()
                             working_proxies = proxies
                         proxy = working_proxies[proxy_index % len(working_proxies)]
@@ -642,15 +830,26 @@ def run_attack(portal_id):
                     state["errors"] += 1
                     error_msg = str(e).lower()
                     proxy_info = f" via {proxy}" if proxy else ""
-                    if "timeout" in error_msg or "connection" in error_msg or "proxy" in error_msg:
+                    if "timeout" in error_msg or "connection" in error_msg or "proxy" in error_msg or "socks" in error_msg:
                         mark_proxy_error(proxy, is_connection_error=True)
-                        add_log(state, f"⚠ Proxy error: {mac}{proxy_info} - {str(e)[:30]}", "warning")
+                        error_count = proxy_error_counts.get(proxy, 0)
+                        if error_count >= max_proxy_errors:
+                            add_log(state, f"🚫 Proxy disabled (too many errors): {proxy}", "error")
+                        else:
+                            add_log(state, f"⚠ Proxy error ({error_count}/{max_proxy_errors}): {proxy} - {str(e)[:40]}", "warning")
                     else:
                         add_log(state, f"✗ Error: {mac} - {str(e)[:50]}", "error")
             
             time.sleep(0.05)
     
     state["running"] = False
+    
+    # Show proxy error summary at end
+    if proxies:
+        failed_proxies = [p for p in proxies if proxy_error_counts.get(p, 0) >= max_proxy_errors]
+        if failed_proxies:
+            add_log(state, f"⚠ {len(failed_proxies)} proxies disabled due to errors: {', '.join(failed_proxies[:3])}{'...' if len(failed_proxies) > 3 else ''}", "warning")
+    
     add_log(state, f"✓ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
 
 
@@ -662,6 +861,7 @@ def test_mac_worker(portal_url, mac, proxy, timeout):
 # ============== PROXY ROUTES WITH CUSTOM SOURCES ==============
 
 @app.route("/api/proxies", methods=["GET", "POST", "DELETE"])
+@requires_auth
 def api_proxies():
     if request.method == "GET":
         return jsonify({
@@ -693,6 +893,7 @@ def api_proxies():
 
 
 @app.route("/api/proxies/sources", methods=["GET", "POST"])
+@requires_auth
 def api_proxy_sources():
     """Manage custom proxy sources."""
     if request.method == "GET":
@@ -709,6 +910,7 @@ def api_proxy_sources():
 
 
 @app.route("/api/proxies/fetch", methods=["POST"])
+@requires_auth
 def api_proxies_fetch():
     global proxy_state
     
@@ -718,13 +920,18 @@ def api_proxies_fetch():
     proxy_state["fetching"] = True
     proxy_state["logs"] = []
     
-    thread = threading.Thread(target=fetch_proxies_worker, daemon=True)
+    # Get proxy type from request
+    data = request.json or {}
+    proxy_type = data.get("proxy_type", "http")
+    
+    thread = threading.Thread(target=fetch_proxies_worker, args=(proxy_type,), daemon=True)
     thread.start()
     
     return jsonify({"success": True})
 
 
 @app.route("/api/proxies/test", methods=["POST"])
+@requires_auth
 def api_proxies_test():
     global proxy_state
     
@@ -741,11 +948,13 @@ def api_proxies_test():
 
 
 @app.route("/api/proxies/status")
+@requires_auth
 def api_proxies_status():
     return jsonify(proxy_state)
 
 
 @app.route("/api/proxies/reset-errors", methods=["POST"])
+@requires_auth
 def api_proxies_reset_errors():
     """Reset proxy error counts."""
     global proxy_error_counts, proxy_error_connect_counts
@@ -754,12 +963,50 @@ def api_proxies_reset_errors():
     return jsonify({"success": True})
 
 
-def fetch_proxies_worker():
+@app.route("/api/proxies/remove-failed", methods=["POST"])
+@requires_auth
+def api_proxies_remove_failed():
+    """Remove failed proxies from the list."""
+    failed = proxy_state.get("failed_proxies", [])
+    if not failed:
+        return jsonify({"success": False, "error": "No failed proxies to remove. Run 'Test Proxies' first."})
+    
+    current = config.get("proxies", [])
+    remaining = [p for p in current if p not in failed]
+    
+    config["proxies"] = remaining
+    proxy_state["failed_proxies"] = []
+    save_config()
+    
+    return jsonify({"success": True, "removed": len(failed), "remaining": len(remaining)})
+
+
+@app.route("/api/proxies/test-autodetect", methods=["POST"])
+@requires_auth
+def api_proxies_test_autodetect():
+    """Test proxies with auto-detection of type (HTTP -> SOCKS5 -> SOCKS4)."""
+    global proxy_state
+    
+    if proxy_state["testing"]:
+        return jsonify({"success": False, "error": "Already testing"})
+    
+    proxy_state["testing"] = True
+    proxy_state["logs"] = []
+    
+    thread = threading.Thread(target=test_proxies_autodetect_worker, daemon=True)
+    thread.start()
+    
+    return jsonify({"success": True})
+
+
+def fetch_proxies_worker(proxy_type="http"):
     """Fetch proxies from all sources including custom ones."""
     global proxy_state
     
     sources = config.get("proxy_sources", DEFAULT_PROXY_SOURCES)
     all_proxies = []
+    
+    add_log(proxy_state, f"Fetching proxies as {proxy_type.upper()} type", "info")
     
     for source in sources:
         try:
@@ -791,15 +1038,31 @@ def fetch_proxies_worker():
         except Exception as e:
             add_log(proxy_state, f"Error fetching from {source}: {e}", "error")
     
+    # Remove duplicates
     all_proxies = list(set(all_proxies))
-    proxy_state["proxies"] = all_proxies
     
-    add_log(proxy_state, f"Total unique proxies: {len(all_proxies)}", "success")
+    # Apply proxy type prefix
+    processed_proxies = []
+    for proxy in all_proxies:
+        # Skip if already has prefix
+        if proxy.startswith("socks4://") or proxy.startswith("socks5://") or proxy.startswith("http://"):
+            processed_proxies.append(proxy)
+        elif proxy_type == "socks4":
+            processed_proxies.append(f"socks4://{proxy}")
+        elif proxy_type == "socks5":
+            processed_proxies.append(f"socks5://{proxy}")
+        else:
+            # HTTP = no prefix
+            processed_proxies.append(proxy)
+    
+    proxy_state["proxies"] = processed_proxies
+    
+    add_log(proxy_state, f"Total unique proxies: {len(processed_proxies)} ({proxy_type.upper()})", "success")
     proxy_state["fetching"] = False
 
 
 def test_proxies_worker():
-    """Test proxies for validity - supports HTTP, SOCKS4, SOCKS5."""
+    """Test proxies for validity - supports HTTP, SOCKS4, SOCKS5. Does NOT remove failed proxies."""
     global proxy_state
     
     proxies = config.get("proxies", [])
@@ -812,6 +1075,7 @@ def test_proxies_worker():
         return
     
     working = []
+    failed = []
     add_log(proxy_state, f"Testing {len(proxies)} proxies...", "info")
     
     def test_proxy(proxy):
@@ -838,20 +1102,118 @@ def test_proxies_worker():
                 working.append(proxy)
                 add_log(proxy_state, f"✓ {proxy}", "success")
             else:
+                failed.append(proxy)
                 add_log(proxy_state, f"✗ {proxy}", "error")
     
     proxy_state["working_proxies"] = working
-    config["proxies"] = working
-    proxy_error_counts.clear()
+    proxy_state["failed_proxies"] = failed
+    # Don't remove failed proxies automatically - user can use "Remove Failed" button
+    proxy_state["proxies"] = proxies  # Keep all proxies in state
+    
+    add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working. Use 'Remove Failed' to delete non-working proxies.", "success")
+    proxy_state["testing"] = False
+
+
+def test_proxies_autodetect_worker():
+    """Test proxies and auto-detect type (HTTP -> SOCKS5 -> SOCKS4)."""
+    global proxy_state
+    
+    proxies = config.get("proxies", [])
+    if not proxies:
+        proxies = proxy_state.get("proxies", [])
+    
+    if not proxies:
+        add_log(proxy_state, "No proxies to test", "warning")
+        proxy_state["testing"] = False
+        return
+    
+    result_proxies = []
+    failed = []
+    add_log(proxy_state, f"Testing {len(proxies)} proxies with auto-detection (HTTP → SOCKS5 → SOCKS4)...", "info")
+    
+    def test_proxy_autodetect(proxy):
+        # Extract base ip:port and auth (remove any existing prefix)
+        original_proxy = proxy
+        base_proxy = proxy
+        auth_part = ""
+        
+        # Remove prefix
+        if proxy.startswith("socks5://"):
+            base_proxy = proxy[9:]
+        elif proxy.startswith("socks4://"):
+            base_proxy = proxy[9:]
+        elif proxy.startswith("http://"):
+            base_proxy = proxy[7:]
+        
+        # Extract auth if present (user:pass@ip:port)
+        if "@" in base_proxy:
+            auth_part, base_proxy = base_proxy.rsplit("@", 1)
+            auth_part = auth_part + "@"
+        
+        # Test order: HTTP (with auth), HTTP (without auth), SOCKS5, SOCKS4
+        test_configs = []
+        
+        # HTTP with auth if auth exists
+        if auth_part:
+            test_configs.append((f"http://{auth_part}{base_proxy}", "HTTP", f"http://{auth_part}{base_proxy}"))
+        
+        # HTTP without auth (or plain ip:port)
+        test_configs.append((base_proxy, "HTTP", base_proxy))
+        
+        # SOCKS5 with auth
+        test_configs.append((f"socks5://{auth_part}{base_proxy}", "SOCKS5", f"socks5://{auth_part}{base_proxy}"))
+        
+        # SOCKS4 (doesn't support auth)
+        test_configs.append((f"socks4://{base_proxy}", "SOCKS4", f"socks4://{base_proxy}"))
+        
+        for test_proxy_str, proxy_type, result_proxy in test_configs:
+            try:
+                with no_proxy_environment():
+                    proxy_dict = stb.parse_proxy(test_proxy_str)
+                    response = requests.get(
+                        "http://httpbin.org/ip",
+                        proxies=proxy_dict,
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        return original_proxy, result_proxy, proxy_type, True
+            except:
+                pass
+        
+        return original_proxy, original_proxy, "NONE", False
+    
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(test_proxy_autodetect, p): p for p in proxies}
+        
+        for future in as_completed(futures):
+            original, detected, proxy_type, is_working = future.result()
+            if is_working:
+                result_proxies.append(detected)
+                if original != detected:
+                    add_log(proxy_state, f"✓ {original} → {detected} ({proxy_type})", "success")
+                else:
+                    add_log(proxy_state, f"✓ {detected} ({proxy_type})", "success")
+            else:
+                failed.append(original)
+                add_log(proxy_state, f"✗ {original} (no working type found)", "error")
+    
+    # Update proxies with detected types
+    proxy_state["working_proxies"] = result_proxies
+    proxy_state["failed_proxies"] = failed
+    proxy_state["proxies"] = result_proxies + failed  # Keep all but update working ones
+    
+    # Save the updated proxies (with correct types)
+    config["proxies"] = result_proxies + failed
     save_config()
     
-    add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working", "success")
+    add_log(proxy_state, f"Done! {len(result_proxies)}/{len(proxies)} working. Types auto-detected and updated.", "success")
     proxy_state["testing"] = False
 
 
 # ============== PLAYER ROUTES ==============
 
 @app.route("/api/player/connect", methods=["POST"])
+@requires_auth
 def api_player_connect():
     data = request.json
     url = data.get("url", "").strip()
@@ -888,6 +1250,7 @@ def api_player_connect():
 
 
 @app.route("/api/player/channels", methods=["POST"])
+@requires_auth
 def api_player_channels():
     data = request.json
     url = data.get("url", "").strip()
@@ -907,6 +1270,7 @@ def api_player_channels():
 
 
 @app.route("/api/player/stream", methods=["POST"])
+@requires_auth
 def api_player_stream():
     data = request.json
     url = data.get("url", "").strip()
@@ -935,6 +1299,7 @@ def api_player_stream():
 # ============== FOUND MACS ==============
 
 @app.route("/api/found", methods=["GET", "DELETE"])
+@requires_auth
 def api_found():
     if request.method == "GET":
         return jsonify(config.get("found_macs", []))
@@ -946,6 +1311,7 @@ def api_found():
 
 
 @app.route("/api/found/export")
+@requires_auth
 def api_found_export():
     """Export found MACs - like original MacAttack output format."""
     format_type = request.args.get("format", "txt")
