@@ -810,7 +810,7 @@ def run_attack(portal_id):
                 if proxies:
                     working_proxies = [p for p in proxies if proxy_error_counts[p] < max_proxy_errors]
                     if not working_proxies:
-                        add_log(state, "âš  All proxies failed! Resetting...", "warning")
+                        add_log(state, "Ã¢Å¡  All proxies failed! Resetting...", "warning")
                         proxy_error_counts.clear()
                         working_proxies = proxies
                     proxy = working_proxies[proxy_index % len(working_proxies)]
@@ -855,8 +855,8 @@ def run_attack(portal_id):
                         "time": datetime.now().strftime("%H:%M:%S")
                     })
                     
-                    de_info = " ðŸ‡©ðŸ‡ª" if has_de else ""
-                    add_log(state, f"ðŸŽ¯ HIT! {mac} - Expiry: {expiry} - Channels: {channels}{de_info}{proxy_info}", "success")
+                    de_info = " Ã°Å¸â¡Â©Ã°Å¸â¡Âª" if has_de else ""
+                    add_log(state, f"Ã°Å¸Å½Â¯ HIT! {mac} - Expiry: {expiry} - Channels: {channels}{de_info}{proxy_info}", "success")
                     
                     # Save to config
                     found_entry = {
@@ -896,7 +896,7 @@ def run_attack(portal_id):
                     if mac in mac_retry_counts:
                         del mac_retry_counts[mac]
                 else:
-                    add_log(state, f"âœ— {mac} - No valid account{proxy_info}", "info")
+                    add_log(state, f"Ã¢Åâ {mac} - No valid account{proxy_info}", "info")
                     if mac in mac_retry_counts:
                         del mac_retry_counts[mac]
             
@@ -916,9 +916,9 @@ def run_attack(portal_id):
                     error_count = proxy_error_counts.get(proxy, 0)
                     
                     if error_count >= max_proxy_errors:
-                        add_log(state, f"ðŸš« Proxy disabled: {proxy}", "error")
+                        add_log(state, f"Ã°Å¸Å¡Â« Proxy disabled: {proxy}", "error")
                     else:
-                        add_log(state, f"âš  Proxy error ({error_count}/{max_proxy_errors}): {proxy}", "warning")
+                        add_log(state, f"Ã¢Å¡  Proxy error ({error_count}/{max_proxy_errors}): {proxy}", "warning")
                     
                     mac_retry_counts[mac] += 1
                     working_proxies_left = [p for p in proxies if proxy_error_counts.get(p, 0) < max_proxy_errors]
@@ -926,25 +926,25 @@ def run_attack(portal_id):
                     if unlimited_mac_retries:
                         if working_proxies_left:
                             retry_queue.append(mac)
-                            add_log(state, f"ðŸ”„ Retry {mac} (attempt {mac_retry_counts[mac]})", "info")
+                            add_log(state, f"Ã°Å¸ââ Retry {mac} (attempt {mac_retry_counts[mac]})", "info")
                         else:
                             state["tested"] += 1
                             state["errors"] += 1
-                            add_log(state, f"âœ— {mac} - All proxies exhausted", "error")
+                            add_log(state, f"Ã¢Åâ {mac} - All proxies exhausted", "error")
                             del mac_retry_counts[mac]
                     else:
                         if mac_retry_counts[mac] < max_mac_retries:
                             retry_queue.append(mac)
-                            add_log(state, f"ðŸ”„ Retry {mac} ({mac_retry_counts[mac]}/{max_mac_retries})", "info")
+                            add_log(state, f"Ã°Å¸ââ Retry {mac} ({mac_retry_counts[mac]}/{max_mac_retries})", "info")
                         else:
                             state["tested"] += 1
                             state["errors"] += 1
-                            add_log(state, f"âœ— {mac} - Max retries reached", "error")
+                            add_log(state, f"Ã¢Åâ {mac} - Max retries reached", "error")
                             del mac_retry_counts[mac]
                 else:
                     state["tested"] += 1
                     state["errors"] += 1
-                    add_log(state, f"âœ— Error: {mac} - {str(e)[:50]}", "error")
+                    add_log(state, f"Ã¢Åâ Error: {mac} - {str(e)[:50]}", "error")
                     if mac in mac_retry_counts:
                         del mac_retry_counts[mac]
         
@@ -955,9 +955,9 @@ def run_attack(portal_id):
     if proxies:
         failed_proxies = [p for p in proxies if proxy_error_counts.get(p, 0) >= max_proxy_errors]
         if failed_proxies:
-            add_log(state, f"âš  {len(failed_proxies)} proxies disabled", "warning")
+            add_log(state, f"Ã¢Å¡  {len(failed_proxies)} proxies disabled", "warning")
     
-    add_log(state, f"âœ“ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
+    add_log(state, f"Ã¢Åâ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
 
 
 def test_mac_worker(portal_url, mac, proxy, timeout):
@@ -1202,10 +1202,10 @@ def test_proxies_worker():
             proxy, is_working = future.result()
             if is_working:
                 working.append(proxy)
-                add_log(proxy_state, f"✓ {proxy}", "success")
+                add_log(proxy_state, f"â {proxy}", "success")
             else:
                 failed.append(proxy)
-                add_log(proxy_state, f"✗ {proxy}", "error")
+                add_log(proxy_state, f"â {proxy}", "error")
     
     proxy_state["working_proxies"] = working
     proxy_state["failed_proxies"] = failed
@@ -1232,7 +1232,7 @@ def test_proxies_autodetect_worker():
     result_proxies = []
     failed = []
     test_threads = get_settings().get("proxy_test_threads", 50)
-    add_log(proxy_state, f"Testing {len(proxies)} proxies with {test_threads} threads (HTTP → SOCKS5 → SOCKS4)...", "info")
+    add_log(proxy_state, f"Testing {len(proxies)} proxies with {test_threads} threads (HTTP â SOCKS5 â SOCKS4)...", "info")
     
     def test_proxy_autodetect(proxy):
         # Extract base ip:port and auth (remove any existing prefix)
@@ -1293,12 +1293,12 @@ def test_proxies_autodetect_worker():
             if is_working:
                 result_proxies.append(detected)
                 if original != detected:
-                    add_log(proxy_state, f"✓ {original} → {detected} ({proxy_type})", "success")
+                    add_log(proxy_state, f"â {original} â {detected} ({proxy_type})", "success")
                 else:
-                    add_log(proxy_state, f"✓ {detected} ({proxy_type})", "success")
+                    add_log(proxy_state, f"â {detected} ({proxy_type})", "success")
             else:
                 failed.append(original)
-                add_log(proxy_state, f"✗ {original} (no working type found)", "error")
+                add_log(proxy_state, f"â {original} (no working type found)", "error")
     
     # Update proxies with detected types
     proxy_state["working_proxies"] = result_proxies
