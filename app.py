@@ -39,6 +39,8 @@ if os.getenv("CONFIG"):
 else:
     log_dir = "./data"
     configFile = os.path.join(log_dir, "macattack.json")
+    
+proxy_semaphores = {}  # Globaler Speicher für Proxy-Limits
 
 os.makedirs(log_dir, exist_ok=True)
 os.makedirs("./logs", exist_ok=True)
