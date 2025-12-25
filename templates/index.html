@@ -45,8 +45,17 @@
                     <label>Attack Mode:</label>
                     <div class="radio-group">
                         <label><input type="radio" name="attack-mode" value="random" checked> Random MAC Generation</label>
-                        <label><input type="radio" name="attack-mode" value="list"> Use MAC List (<span id="mac-list-count">0</span> MACs)</label>
+                        <label><input type="radio" name="attack-mode" value="list"> Use MAC List</label>
                         <label><input type="radio" name="attack-mode" value="refresh"> Refresh Found MACs (<span id="found-mac-count">0</span> MACs)</label>
+                    </div>
+                </div>
+                <div class="form-row" id="mac-list-select-row" style="display: none;">
+                    <div class="form-group">
+                        <label>Select MAC List:</label>
+                        <select id="attack-mac-list">
+                            <option value="1">List 1 (<span id="mac-list-1-count">0</span> MACs)</option>
+                            <option value="2">List 2 (<span id="mac-list-2-count">0</span> MACs)</option>
+                        </select>
                     </div>
                 </div>
                 <div class="button-group">
@@ -100,6 +109,10 @@
                     <div class="info-row" id="list-progress-row" style="display: none;">
                         <span>List Progress:</span>
                         <span id="list-progress">0 / 0</span>
+                    </div>
+                    <div class="info-row" id="proxy-stats-row" style="display: none;">
+                        <span>Proxy Stats:</span>
+                        <span id="proxy-stats-info">-</span>
                     </div>
                 </div>
 
@@ -219,11 +232,20 @@
                 <div class="help-text">
                     Import a list of MAC addresses to test. One MAC per line.<br>
                     <strong>Supported formats:</strong> 00:1A:79:XX:XX:XX, 00-1A-79-XX-XX-XX<br>
-                    <strong>Max file size:</strong> 100 MB
+                    <strong>Max file size:</strong> 500 MB
                 </div>
-                <div class="form-group">
-                    <label>Upload File: <span id="file-info" style="color: var(--text-secondary);"></span></label>
-                    <input type="file" id="mac-file-input" accept=".txt,.csv">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Target List:</label>
+                        <select id="import-target-list">
+                            <option value="1">List 1</option>
+                            <option value="2">List 2</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex: 2;">
+                        <label>Upload File: <span id="file-info" style="color: var(--text-secondary);"></span></label>
+                        <input type="file" id="mac-file-input" accept=".txt,.csv">
+                    </div>
                 </div>
                 <div id="import-progress" style="display: none; margin-bottom: 15px;">
                     <div style="background: var(--bg-tertiary); border-radius: 4px; overflow: hidden;">
@@ -234,12 +256,22 @@
                 <button id="btn-import-file" class="btn btn-primary">Import from File</button>
             </div>
 
-            <div class="panel">
-                <h2>MAC Addresses (<span id="maclist-count">0</span>)</h2>
-                <textarea id="mac-list-textarea" placeholder="Enter MAC addresses (one per line)&#10;00:1A:79:XX:XX:XX&#10;00:1A:79:YY:YY:YY"></textarea>
-                <div class="button-group">
-                    <button id="btn-save-maclist" class="btn btn-success">Save MAC List</button>
-                    <button id="btn-clear-maclist" class="btn btn-danger">Clear All</button>
+            <div class="two-columns">
+                <div class="panel">
+                    <h2>MAC List 1 (<span id="maclist-count-1">0</span>)</h2>
+                    <textarea id="mac-list-textarea-1" placeholder="Enter MAC addresses (one per line)&#10;00:1A:79:XX:XX:XX"></textarea>
+                    <div class="button-group">
+                        <button class="btn btn-success btn-save-maclist" data-list="1">Save List 1</button>
+                        <button class="btn btn-danger btn-clear-maclist" data-list="1">Clear</button>
+                    </div>
+                </div>
+                <div class="panel">
+                    <h2>MAC List 2 (<span id="maclist-count-2">0</span>)</h2>
+                    <textarea id="mac-list-textarea-2" placeholder="Enter MAC addresses (one per line)&#10;00:1A:79:XX:XX:XX"></textarea>
+                    <div class="button-group">
+                        <button class="btn btn-success btn-save-maclist" data-list="2">Save List 2</button>
+                        <button class="btn btn-danger btn-clear-maclist" data-list="2">Clear</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -411,8 +443,13 @@
                     </div>
                     <div class="form-group">
                         <label>Max Proxy Errors:</label>
-                        <input type="number" id="setting-max-proxy-errors" min="1" max="20" value="5">
+                        <input type="number" id="setting-max-proxy-errors" min="1" max="20" value="3">
                         <small style="color: var(--text-secondary);">Disable proxy after this many errors</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Connections per Proxy:</label>
+                        <input type="number" id="setting-proxy-connections" min="1" max="50" value="5">
+                        <small style="color: var(--text-secondary);">Max concurrent connections per proxy per portal</small>
                     </div>
                 </div>
                 <div class="form-row">
