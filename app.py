@@ -790,8 +790,6 @@ def run_attack(portal_id):
         add_log(state, f"Using {stats['total']} proxies", "info")
         state["proxy_stats"] = stats
     
-    last_gc = time.time()
-    
     with ThreadPoolExecutor(max_workers=speed) as executor:
         futures = {}
         list_exhausted = False
@@ -824,11 +822,6 @@ def run_attack(portal_id):
                 if use_proxies:
                     new_proxies = config.get("proxies", [])
                     proxy_manager.reload_proxies(new_proxies)
-            
-            # Garbage collection every 60 seconds
-            if time.time() - last_gc > 60:
-                gc.collect()
-                last_gc = time.time()
             
             if use_proxies:
                 state["proxy_stats"] = proxy_manager.get_stats()
@@ -865,7 +858,7 @@ def run_attack(portal_id):
                         state["mac_list_index"] = mac_list_index
                     else:
                         # Random mode - limit scanned_macs to prevent memory issues
-                        if len(state["scanned_macs"]) > 100000:
+                        if len(state["scanned_macs"]) > 500000:
                             state["scanned_macs"].clear()
                         mac = generate_mac(mac_prefix)
                         attempts = 0
