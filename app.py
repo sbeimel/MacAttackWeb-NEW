@@ -75,7 +75,8 @@ proxy_state = {
     "proxies": [],
     "working_proxies": [],
     "failed_proxies": [],
-    "logs": []
+    "logs": [],
+    "proxy_speeds": {}  # proxy -> response time in ms
 }
 
 # Default settings
@@ -458,9 +459,9 @@ def api_maclist_import():
 # ============== MULTI-PORTAL ATTACK ==============
 
 class ProxyManager:
-    """Per-portal proxy management with load balancing."""
+    """Per-portal proxy management with load balancing and speed prioritization."""
     
-    def __init__(self, proxies, max_errors=3, max_connections=5):
+    def __init__(self, proxies, max_errors=3, max_connections=5, speeds=None):
         self.all_proxies = list(proxies) if proxies else []
         self.max_errors = max_errors
         self.max_connections = max_connections
@@ -471,6 +472,11 @@ class ProxyManager:
         self.connection_counts = defaultdict(int)
         self.current_index = 0
         self.lock = threading.Lock()
+        self.speeds = dict(speeds) if speeds else {}  # proxy -> ms
+        
+        # Sort proxies by speed if available
+        if self.speeds:
+            self.all_proxies.sort(key=lambda p: self.speeds.get(p, 9999))
     
     def get_stats(self):
         with self.lock:
@@ -539,12 +545,18 @@ class ProxyManager:
             if proxy and self.error_counts[proxy] > 0:
                 self.error_counts[proxy] = max(0, self.error_counts[proxy] - 1)
     
-    def reload_proxies(self, new_proxies):
+    def reload_proxies(self, new_proxies, speeds=None):
         with self.lock:
             new_set = set(new_proxies)
             for p in new_set - set(self.all_proxies):
                 self.all_proxies.append(p)
             self.all_proxies = [p for p in self.all_proxies if p in new_set]
+            
+            # Update speeds if provided
+            if speeds:
+                self.speeds.update(speeds)
+                # Re-sort by speed
+                self.all_proxies.sort(key=lambda p: self.speeds.get(p, 9999))
     
     def has_working_proxies(self):
         return len(self.get_working_proxies()) > 0
@@ -554,6 +566,7 @@ class ProxyManager:
         with self.lock:
             self.error_counts.clear()
             self.connection_counts.clear()
+            self.speeds.clear()
 
 
 def create_attack_state(portal_id, portal_url, mode="random", mac_list_id="1"):
@@ -760,9 +773,10 @@ def run_attack(portal_id):
     max_mac_retries = settings.get("max_mac_retries", 3)
     proxy_connections = settings.get("proxy_connections_per_portal", 5)
     
-    # Initialize proxy manager
+    # Initialize proxy manager with speeds
     initial_proxies = config.get("proxies", []) if use_proxies else []
-    proxy_manager = ProxyManager(initial_proxies, max_proxy_errors, proxy_connections)
+    initial_speeds = proxy_state.get("proxy_speeds", {})
+    proxy_manager = ProxyManager(initial_proxies, max_proxy_errors, proxy_connections, initial_speeds)
     
     # Build MAC list
     list_key = "mac_list" if mac_list_id == "1" else "mac_list_2"
@@ -801,7 +815,8 @@ def run_attack(portal_id):
                 time.sleep(0.5)
                 if use_proxies:
                     new_proxies = config.get("proxies", [])
-                    proxy_manager.reload_proxies(new_proxies)
+                    new_speeds = proxy_state.get("proxy_speeds", {})
+                    proxy_manager.reload_proxies(new_proxies, new_speeds)
                     if state.get("auto_paused") and proxy_manager.has_working_proxies():
                         state["paused"] = False
                         state["auto_paused"] = False
@@ -821,7 +836,8 @@ def run_attack(portal_id):
                 
                 if use_proxies:
                     new_proxies = config.get("proxies", [])
-                    proxy_manager.reload_proxies(new_proxies)
+                    new_speeds = proxy_state.get("proxy_speeds", {})
+                    proxy_manager.reload_proxies(new_proxies, new_speeds)
             
             if use_proxies:
                 state["proxy_stats"] = proxy_manager.get_stats()
@@ -1035,15 +1051,26 @@ def api_proxies():
         data = request.json
         proxies = data.get("proxies", "").strip().split("\n")
         proxies = [p.strip() for p in proxies if p.strip()]
+        
+        # Validate and deduplicate
         seen = set()
         unique_proxies = []
+        invalid_count = 0
         for p in proxies:
+            if not validate_proxy_format(p):
+                invalid_count += 1
+                continue
             if p not in seen:
                 seen.add(p)
                 unique_proxies.append(p)
+        
         config["proxies"] = unique_proxies
         save_config()
-        return jsonify({"success": True, "count": len(unique_proxies)})
+        
+        result = {"success": True, "count": len(unique_proxies)}
+        if invalid_count > 0:
+            result["invalid"] = invalid_count
+        return jsonify(result)
     
     if request.method == "DELETE":
         config["proxies"] = []
@@ -1154,11 +1181,64 @@ def api_proxies_test_autodetect():
     return jsonify({"success": True})
 
 
+def validate_proxy_format(proxy):
+    """Validate proxy format. Returns True if valid."""
+    proxy = proxy.strip()
+    if not proxy:
+        return False
+    
+    # Remove protocol prefix for validation
+    for prefix in ["socks5://", "socks4://", "http://", "https://"]:
+        if proxy.lower().startswith(prefix):
+            proxy = proxy[len(prefix):]
+            break
+    
+    # Remove auth part if present (user:pass@)
+    if "@" in proxy:
+        proxy = proxy.split("@")[-1]
+    
+    # Must be IP:PORT or HOST:PORT format
+    if ":" not in proxy:
+        return False
+    
+    parts = proxy.rsplit(":", 1)
+    if len(parts) != 2:
+        return False
+    
+    host, port = parts
+    
+    # Validate port
+    try:
+        port_num = int(port)
+        if port_num < 1 or port_num > 65535:
+            return False
+    except ValueError:
+        return False
+    
+    # Validate IP format (4 octets separated by dots)
+    ip_parts = host.split(".")
+    if len(ip_parts) == 4:
+        try:
+            for octet in ip_parts:
+                num = int(octet)
+                if num < 0 or num > 255:
+                    return False
+            return True
+        except ValueError:
+            return False
+    
+    # Could be hostname - allow if it has valid characters
+    if host and all(c.isalnum() or c in ".-_" for c in host):
+        return True
+    
+    return False
+
+
 def fetch_proxies_worker():
     global proxy_state
     
     sources = config.get("proxy_sources", DEFAULT_PROXY_SOURCES)
-    all_proxies = []
+    new_proxies = []
     
     add_log(proxy_state, f"Fetching from {len(sources)} sources...", "info")
     
@@ -1170,24 +1250,36 @@ def fetch_proxies_worker():
                 
                 if "spys.me" in source:
                     matches = re.findall(r"[0-9]+(?:\.[0-9]+){3}:[0-9]+", response.text)
-                    all_proxies.extend(matches)
+                    new_proxies.extend(matches)
                 else:
                     matches = re.findall(r"<td>(\d+\.\d+\.\d+\.\d+)</td><td>(\d+)</td>", response.text)
                     if matches:
-                        all_proxies.extend([f"{ip}:{port}" for ip, port in matches])
+                        new_proxies.extend([f"{ip}:{port}" for ip, port in matches])
                     else:
                         prefixed = re.findall(r"((?:socks[45]|http)://[^\s<>\"']+)", response.text, re.IGNORECASE)
                         if prefixed:
-                            all_proxies.extend(prefixed)
+                            new_proxies.extend(prefixed)
                         plain = re.findall(r"(\d+\.\d+\.\d+\.\d+:\d+)", response.text)
-                        all_proxies.extend(plain)
+                        new_proxies.extend(plain)
         except Exception as e:
             add_log(proxy_state, f"Error: {source}: {e}", "error")
     
-    all_proxies = list(set(all_proxies))
+    # Get existing proxies and merge (append new ones)
+    existing_proxies = set(config.get("proxies", []))
+    
+    # Validate and filter new proxies
+    valid_new = [p for p in new_proxies if validate_proxy_format(p) and p not in existing_proxies]
+    invalid_count = len(new_proxies) - len([p for p in new_proxies if validate_proxy_format(p)])
+    
+    # Combine: existing + new unique valid
+    all_proxies = list(existing_proxies) + valid_new
+    
     proxy_state["proxies"] = all_proxies
     
-    add_log(proxy_state, f"Total: {len(all_proxies)} proxies", "success")
+    msg = f"Fetched {len(valid_new)} new proxies (total: {len(all_proxies)})"
+    if invalid_count > 0:
+        msg += f", {invalid_count} invalid filtered"
+    add_log(proxy_state, msg, "success")
     proxy_state["fetching"] = False
     gc.collect()
 
@@ -1204,6 +1296,7 @@ def test_proxies_worker():
     
     working = []
     failed = []
+    speeds = {}
     test_threads = get_settings().get("proxy_test_threads", 50)
     add_log(proxy_state, f"Testing {len(proxies)} proxies...", "info")
     
@@ -1211,29 +1304,36 @@ def test_proxies_worker():
         try:
             with no_proxy_environment():
                 proxy_dict = stb.parse_proxy(proxy)
+                start_time = time.time()
                 response = requests.get("http://httpbin.org/ip", proxies=proxy_dict, timeout=10)
+                elapsed_ms = int((time.time() - start_time) * 1000)
                 if response.status_code == 200:
-                    return proxy, True
+                    return proxy, True, elapsed_ms
         except:
             pass
-        return proxy, False
+        return proxy, False, 0
     
     with ThreadPoolExecutor(max_workers=test_threads) as executor:
         futures = {executor.submit(test_proxy, p): p for p in proxies}
         
         for future in as_completed(futures):
-            proxy, is_working = future.result()
+            proxy, is_working, speed_ms = future.result()
             if is_working:
                 working.append(proxy)
-                add_log(proxy_state, f"✓ {proxy}", "success")
+                speeds[proxy] = speed_ms
+                add_log(proxy_state, f"✓ {proxy} ({speed_ms}ms)", "success")
             else:
                 failed.append(proxy)
                 add_log(proxy_state, f"✗ {proxy}", "error")
     
+    # Sort working proxies by speed (fastest first)
+    working.sort(key=lambda p: speeds.get(p, 9999))
+    
     proxy_state["working_proxies"] = working
     proxy_state["failed_proxies"] = failed
+    proxy_state["proxy_speeds"] = speeds
     
-    add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working", "success")
+    add_log(proxy_state, f"Done! {len(working)}/{len(proxies)} working (sorted by speed)", "success")
     proxy_state["testing"] = False
     gc.collect()
 
@@ -1250,6 +1350,7 @@ def test_proxies_autodetect_worker():
     
     result_proxies = []
     failed = []
+    speeds = {}
     test_threads = get_settings().get("proxy_test_threads", 50)
     add_log(proxy_state, f"Testing {len(proxies)} proxies (auto-detect)...", "info")
     
@@ -1276,33 +1377,41 @@ def test_proxies_autodetect_worker():
             try:
                 with no_proxy_environment():
                     proxy_dict = stb.parse_proxy(test_str)
+                    start_time = time.time()
                     response = requests.get("http://httpbin.org/ip", proxies=proxy_dict, timeout=10)
+                    elapsed_ms = int((time.time() - start_time) * 1000)
                     if response.status_code == 200:
-                        return proxy, result_str, ptype, True
+                        return proxy, result_str, ptype, True, elapsed_ms
             except:
                 pass
         
-        return proxy, proxy, "NONE", False
+        return proxy, proxy, "NONE", False, 0
     
     with ThreadPoolExecutor(max_workers=test_threads) as executor:
         futures = {executor.submit(test_proxy_autodetect, p): p for p in proxies}
         
         for future in as_completed(futures):
-            original, detected, ptype, is_working = future.result()
+            original, detected, ptype, is_working, speed_ms = future.result()
             if is_working:
                 result_proxies.append(detected)
-                add_log(proxy_state, f"✓ {detected} ({ptype})", "success")
+                speeds[detected] = speed_ms
+                add_log(proxy_state, f"✓ {detected} ({ptype}, {speed_ms}ms)", "success")
             else:
                 failed.append(original)
                 add_log(proxy_state, f"✗ {original}", "error")
     
+    # Sort working proxies by speed (fastest first)
+    result_proxies.sort(key=lambda p: speeds.get(p, 9999))
+    
     proxy_state["working_proxies"] = result_proxies
     proxy_state["failed_proxies"] = failed
+    proxy_state["proxy_speeds"] = speeds
     
+    # Save sorted proxies (working first, sorted by speed)
     config["proxies"] = result_proxies + failed
     save_config()
     
-    add_log(proxy_state, f"Done! {len(result_proxies)}/{len(proxies)} working", "success")
+    add_log(proxy_state, f"Done! {len(result_proxies)}/{len(proxies)} working (sorted by speed)", "success")
     proxy_state["testing"] = False
     gc.collect()
 
