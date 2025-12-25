@@ -955,32 +955,6 @@ document.getElementById('btn-save-proxy-settings').addEventListener('click', asy
     alert('Proxy settings saved!');
 });
 
-<<<<<<< Updated upstream
-
-// Network Settings Save Button
-document.getElementById('btn-save-network-settings').addEventListener('click', async () => {
-    const settings = {
-        session_max_retries: parseInt(document.getElementById('setting-session-retries').value),
-        session_connect_timeout: parseInt(document.getElementById('setting-connect-timeout').value),
-        session_read_timeout: parseInt(document.getElementById('setting-read-timeout').value)
-    };
-    
-    const res = await fetch('/api/settings', { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify(settings) 
-    });
-    
-    if (res.ok) {
-        alert('Network settings saved!\n\nNote: Changes apply to NEW scans only.\nStop and restart any running attacks to use new settings.');
-    } else {
-        alert('Error saving settings');
-    }
-});
-
-// Toggle max retries input based on unlimited checkbox
-=======
->>>>>>> Stashed changes
 document.getElementById('setting-unlimited-retries').addEventListener('change', (e) => {
     document.getElementById('setting-max-mac-retries').disabled = e.target.checked;
 });
@@ -989,8 +963,6 @@ document.getElementById('setting-unlimited-retries').addEventListener('change', 
 (async () => {
     const res = await fetch('/api/settings');
     const s = await res.json();
-    
-    // Existing settings
     document.getElementById('setting-speed').value = s.speed || 10;
     document.getElementById('setting-timeout').value = s.timeout || 10;
     document.getElementById('setting-prefix').value = s.mac_prefix || '00:1A:79:';
@@ -1000,17 +972,8 @@ document.getElementById('setting-unlimited-retries').addEventListener('change', 
     document.getElementById('setting-max-proxy-errors').value = s.max_proxy_errors || 3;
     document.getElementById('setting-unlimited-retries').checked = s.unlimited_mac_retries !== false;
     document.getElementById('setting-max-mac-retries').value = s.max_mac_retries || 3;
-<<<<<<< Updated upstream
-    document.getElementById('setting-max-mac-retries').disabled = s.unlimited_mac_retries || false;
-    
-    // NEW network settings
-    document.getElementById('setting-session-retries').value = s.session_max_retries !== undefined ? s.session_max_retries : 0;
-    document.getElementById('setting-connect-timeout').value = s.session_connect_timeout || 5;
-    document.getElementById('setting-read-timeout').value = s.session_read_timeout || 10;
-=======
     document.getElementById('setting-max-mac-retries').disabled = s.unlimited_mac_retries !== false;
     document.getElementById('setting-proxy-connections').value = s.proxy_connections_per_portal || 5;
->>>>>>> Stashed changes
 })();
 
 
