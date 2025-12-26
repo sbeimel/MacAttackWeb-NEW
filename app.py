@@ -145,35 +145,36 @@ class ProxyScorer:
         """
         Calculate proxy score (lower = better).
         Considers: speed, fail rate, blocked status
+        
+        NOTE: Caller must hold self.lock!
         """
-        with self.lock:
-            if proxy not in self.scores:
-                return 5000  # New proxy - neutral score
-            
-            s = self.scores[proxy]
-            
-            # Blocked for this portal = infinite score
-            if portal and portal in s["blocked"]:
-                return float('inf')
-            
-            # Too many consecutive fails = very bad
-            if s["consecutive_fails"] >= 5:
-                return float('inf')
-            
-            # Base score = speed
-            score = s["speed"]
-            
-            # Penalty for fail rate
-            total = s["success"] + s["fail"]
-            if total > 0:
-                fail_rate = s["fail"] / total
-                score *= (1 + fail_rate * 2)  # Up to 3x penalty for 100% fail rate
-            
-            # Penalty for slow timeouts
-            if s["slow"] > 3:
-                score *= 1.5
-            
-            return score
+        if proxy not in self.scores:
+            return 5000  # New proxy - neutral score
+        
+        s = self.scores[proxy]
+        
+        # Blocked for this portal = infinite score
+        if portal and portal in s["blocked"]:
+            return float('inf')
+        
+        # Too many consecutive fails = very bad
+        if s["consecutive_fails"] >= 5:
+            return float('inf')
+        
+        # Base score = speed
+        score = s["speed"]
+        
+        # Penalty for fail rate
+        total = s["success"] + s["fail"]
+        if total > 0:
+            fail_rate = s["fail"] / total
+            score *= (1 + fail_rate * 2)  # Up to 3x penalty for 100% fail rate
+        
+        # Penalty for slow timeouts
+        if s["slow"] > 3:
+            score *= 1.5
+        
+        return score
     
     def get_best_proxies(self, proxies, portal=None, count=5):
         """
