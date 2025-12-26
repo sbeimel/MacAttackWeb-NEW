@@ -851,7 +851,9 @@ def run_attack(portal_id):
                 # Get proxy
                 proxy = None
                 if use_proxies and proxies:
+                    add_log(state, f"Debug: Requesting proxy from {len(proxies)} proxies", "info")
                     proxy = proxy_scorer.get_next_proxy(proxies, portal_url, max_proxy_errors)
+                    add_log(state, f"Debug: Got proxy: {proxy}", "info")
                     
                     # Avoid same proxy that just failed
                     if proxy == last_proxy and len(proxies) > 1:
@@ -871,6 +873,8 @@ def run_attack(portal_id):
                         break
                     
                     state["current_proxy"] = proxy
+                else:
+                    add_log(state, f"Debug: use_proxies={use_proxies}, proxies count={len(proxies) if proxies else 0}", "info")
                 
                 state["current_mac"] = mac
                 
