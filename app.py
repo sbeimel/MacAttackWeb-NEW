@@ -763,7 +763,9 @@ def run_attack(portal_id):
     if use_proxies:
         proxies = config.get("proxies", [])
         add_log(state, f"Using {len(proxies)} proxies with smart rotation", "info")
+        # Reset consecutive fails at start (important after container restart)
         proxy_scorer.reset_consecutive_fails()
+        add_log(state, f"Reset proxy error counters", "info")
     
     with ThreadPoolExecutor(max_workers=speed) as executor:
         futures = {}  # future -> (mac, proxy, retry_count, start_time)
@@ -814,7 +816,6 @@ def run_attack(portal_id):
             # Check if proxies available
             if use_proxies:
                 working_count = proxy_scorer.get_working_count(proxies, portal_url, max_proxy_errors)
-                add_log(state, f"Debug: {working_count} working proxies out of {len(proxies)}", "info")
                 if working_count == 0 and not state["auto_paused"]:
                     add_log(state, "⚠ All proxies exhausted! Auto-pausing.", "warning")
                     state["paused"] = True
@@ -852,9 +853,7 @@ def run_attack(portal_id):
                 # Get proxy
                 proxy = None
                 if use_proxies and proxies:
-                    add_log(state, f"Debug: Requesting proxy from {len(proxies)} proxies", "info")
                     proxy = proxy_scorer.get_next_proxy(proxies, portal_url, max_proxy_errors)
-                    add_log(state, f"Debug: Got proxy: {proxy}", "info")
                     
                     # Avoid same proxy that just failed
                     if proxy == last_proxy and len(proxies) > 1:
@@ -874,8 +873,6 @@ def run_attack(portal_id):
                         break
                     
                     state["current_proxy"] = proxy
-                else:
-                    add_log(state, f"Debug: use_proxies={use_proxies}, proxies count={len(proxies) if proxies else 0}", "info")
                 
                 state["current_mac"] = mac
                 
