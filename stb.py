@@ -155,7 +155,7 @@ def auto_detect_portal_url(base_url, proxy=None, timeout=10):
             continue
     
     # Fallback: return with /c/ and let it fail gracefully
-    logger.warning(f"No portal endpoint auto-detected for {base_url}, defaulting to /c/")
+    logger.debug(f"No portal endpoint auto-detected for {base_url}, defaulting to /c/")
     return f"{clean_base}/c", "portal.php", "5.3.1"
 
 
@@ -847,3 +847,5 @@ def test_mac_full(url, mac, proxy=None, timeout=15):
     except Exception as e:
         logger.error(f"Error in full MAC test for {mac}: {e}")
         return False, result
+
+

@@ -813,6 +813,7 @@ def run_attack(portal_id):
             # Check if proxies available
             if use_proxies:
                 working_count = proxy_scorer.get_working_count(proxies, portal_url, max_proxy_errors)
+                add_log(state, f"Debug: {working_count} working proxies out of {len(proxies)}", "info")
                 if working_count == 0 and not state["auto_paused"]:
                     add_log(state, "⚠ All proxies exhausted! Auto-pausing.", "warning")
                     state["paused"] = True
