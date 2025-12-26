@@ -61,7 +61,7 @@ def get_headers(token=None, token_random=None):
         "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
         "Accept-Encoding": "identity",
         "Accept": "*/*",
-        "Connection": "close",  # No keep-alive for speed
+        "Connection": "close",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -107,32 +107,25 @@ def do_request(url, cookies, headers, proxies, timeout):
     Note: HTTP 401 is NOT raised - caller must check (MAC invalid)
     """
     try:
-        # Fast connect timeout (3s), configurable read timeout
         resp = requests.get(url, cookies=cookies, headers=headers, 
                            proxies=proxies, timeout=(3, timeout))
         
         # Check for Cloudflare / HTML error pages (proxy blocked)
         content_type = resp.headers.get("Content-Type", "").lower()
         if "text/html" in content_type:
-            # Portal sent HTML instead of JSON = Proxy blocked or Cloudflare
             if "cloudflare" in resp.text.lower() or "captcha" in resp.text.lower():
                 raise ProxyBlockedError("Cloudflare/Captcha detected")
-            # Could also be portal error page
             if resp.status_code >= 400:
                 raise ProxyBlockedError(f"HTTP {resp.status_code} - HTML response")
         
-        # HTTP 401 = MAC invalid (NOT proxy error) - let caller handle
         # HTTP 403 = Could be proxy blocked OR MAC invalid - check response
         if resp.status_code == 403:
-            # Try to parse JSON - if it works, it's a MAC error
             try:
                 data = resp.json()
-                # If we get valid JSON with error message, it's MAC-related
                 if isinstance(data, dict):
-                    return resp  # Let caller handle MAC error
+                    return resp
             except:
                 pass
-            # No valid JSON = Proxy blocked
             raise ProxyBlockedError("403 Forbidden - Proxy blocked")
         
         # Gateway errors = Proxy slow/overloaded
@@ -195,7 +188,6 @@ def test_mac(url, mac, proxy=None, timeout=10):
     
     # Check HTTP status
     if resp.status_code == 401:
-        # MAC invalid/expired
         return False, {"mac": mac, "error": "401 Unauthorized"}
     
     # Check for portal errors (not proxy related)
@@ -210,14 +202,11 @@ def test_mac(url, mac, proxy=None, timeout=10):
         token = data.get("js", {}).get("token")
         token_random = data.get("js", {}).get("random")
     except (json.JSONDecodeError, ValueError) as e:
-        # Invalid JSON = Portal overloaded or proxy issue
         raise ProxySlowError(f"Invalid JSON response: {e}")
     except Exception as e:
-        # Empty response or other parsing error
         raise ProxySlowError(f"Failed to parse response: {e}")
     
     if not token:
-        # Portal said no token = MAC NOT VALID
         return False, {"mac": mac, "error": "No token"}
     
     # ========== TOKEN RECEIVED = MAC IS VALID ==========
@@ -255,7 +244,6 @@ def test_mac(url, mac, proxy=None, timeout=10):
         profile_url = f"{base_url}/{portal_type}?type=stb&action=get_profile&hd=1&ver=ImageDescription: 0.2.18-r23-250; ImageDate: Wed Aug 29 10:49:53 EEST 2018; PORTAL version: 5.3.1; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x58c&num_banks=2&sn={sn}&stb_type=MAG250&client_type=STB&image_version=218&video_out=hdmi&device_id={device_id2}&device_id2={device_id2}&sig={sig}&auth_second_step=1&hw_version=1.7-BD-00&not_valid_token=0&metrics={quote(metrics)}&hw_version_2={hw_version_2}&timestamp={int(time.time())}&api_sig=262&prehash=0"
         resp = do_request(profile_url, cookies, headers, proxies, timeout)
         
-        # Check for 401 (MAC expired during scan)
         if resp.status_code == 401:
             return False, {"mac": mac, "error": "401 during profile"}
         
@@ -269,9 +257,9 @@ def test_mac(url, mac, proxy=None, timeout=10):
             if data["js"].get("expire_billing_date"):
                 result["expiry"] = data["js"]["expire_billing_date"]
     except (ProxyDeadError, ProxySlowError, ProxyBlockedError):
-        raise  # Retry with different proxy
+        raise
     except:
-        pass  # Continue with partial data
+        pass
     
     # Step 2: get_main_info for expiry (critical)
     try:
@@ -382,7 +370,6 @@ def test_mac(url, mac, proxy=None, timeout=10):
     except:
         pass
     
-    # MAC IS VALID - return with all collected data
     return True, result
 
 
@@ -403,7 +390,6 @@ def get_token(url, mac, proxy=None, timeout=10):
         token_random = data.get("js", {}).get("random")
         
         if token:
-            # Activate profile
             sn, device_id, device_id2, hw_version_2 = generate_device_ids(mac)
             headers = get_headers(token, token_random)
             
