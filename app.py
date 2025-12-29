@@ -1,19 +1,36 @@
-import os, json, threading, asyncio, secrets, logging, re, time
-import requests
+import os
+import json
+import threading
+import asyncio
+import secrets
+import re
+import logging
 from datetime import datetime
 from functools import wraps
 from collections import deque
 from flask import Flask, render_template, request, jsonify, Response, session
-import stb  # WICHTIG: Erwartet die neue asynchrone stb.py
+import requests
 
-# --- KONFIGURATION (Original Pfade) ---
+# Importiere den neuen Async-Client aus der stb.py
+import stb 
+
+# --- KONFIGURATION ---
+# Wir nutzen Port 5003, da dein docker-compose diesen Port nach außen gibt
+PORT = 5003
 CONFIG_FILE = os.getenv("CONFIG", "/app/data/macattack.json")
+
 app = Flask(__name__)
 app.secret_key = secrets.token_urlsafe(32)
 
+# Globaler Status für das Web-UI
 SCAN_STATE = {
-    "running": False, "total": 0, "checked": 0, "hits": 0, 
-    "errors": 0, "active_proxies": 0, "status_msg": "Idle"
+    "running": False,
+    "total": 0,
+    "checked": 0,
+    "hits": 0,
+    "errors": 0,
+    "active_proxies": 0,
+    "status_msg": "Bereit"
 }
 
 def load_config():
@@ -22,13 +39,13 @@ def load_config():
             with open(CONFIG_FILE, 'r') as f:
                 conf = json.load(f)
                 # Sicherstellen, dass die Original-Keys existieren
-                if "proxy_sources" not in conf: conf["proxy_sources"] = []
-                if "proxies" not in conf: conf["proxies"] = []
-                if "found_macs" not in conf: conf["found_macs"] = []
-                if "settings" not in conf: conf["settings"] = {"auth_enabled": False, "unlimited_retries": True}
+                for key in ["proxy_sources", "proxies", "found_macs", "portals", "mac_lists"]:
+                    if key not in conf: conf[key] = []
+                if "settings" not in conf: 
+                    conf["settings"] = {"auth_enabled": False, "unlimited_retries": True}
                 return conf
         except: pass
-    return {"portals": [], "proxies": [], "found_macs": [], "proxy_sources": [], "settings": {}}
+    return {"portals": [], "proxies": [], "found_macs": [], "proxy_sources": [], "mac_lists": [], "settings": {}}
 
 def save_config(conf):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
@@ -44,7 +61,21 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-# --- ORIGINAL PROXY FETCHING LOGIK ---
+# --- PROXY LOGIK (FETCH & SOURCES) ---
+
+@app.route('/api/proxies/sources', methods=['GET', 'POST', 'DELETE'])
+@requires_auth
+def api_proxy_sources():
+    conf = load_config()
+    if request.method == 'POST':
+        conf['proxy_sources'] = request.json.get('sources', [])
+        save_config(conf)
+        return jsonify({"success": True})
+    elif request.method == 'DELETE':
+        conf['proxy_sources'] = []
+        save_config(conf)
+        return jsonify({"success": True})
+    return jsonify(conf.get('proxy_sources', []))
 
 @app.route('/api/proxies/fetch', methods=['POST'])
 @requires_auth
@@ -52,7 +83,6 @@ def api_proxies_fetch():
     conf = load_config()
     sources = conf.get('proxy_sources', [])
     new_proxies = set()
-    
     # Original Regex für IP:Port
     proxy_re = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}\b')
     
@@ -73,41 +103,23 @@ def api_proxies_fetch():
 @app.route('/api/proxies/test', methods=['POST'])
 @requires_auth
 def api_proxies_test():
-    """Nutzt die Original-Idee: Proxies validieren."""
-    # Im asynchronen System erledigt das der Scanner via Scoring (Punktabzug bei Fehlern)
-    # Wir geben dem UI eine Erfolgsmeldung zurück
-    return jsonify({"success": True, "message": "Proxies will be validated during attack."})
+    """Der Scanner übernimmt das Testen automatisch via Scoring."""
+    return jsonify({"success": True, "message": "Proxies werden beim Start der Attacke validiert."})
 
-# --- ORIGINAL AUTO-DETECT LOGIK ---
-
-@app.route('/api/attack/autodetect', methods=['POST'])
-@requires_auth
-def api_autodetect():
-    data = request.json
-    url = data.get('url') or data.get('portal')
-    if not url: return jsonify({"success": False, "error": "No URL provided"})
-    
-    # Hier nutzen wir die Auto-Detect Logik aus der stb.py
-    # Wir simulieren eine kurze Prüfung für das UI
-    return jsonify({
-        "success": True, 
-        "detected_url": url, 
-        "message": "Auto-detection enabled for this portal."
-    })
-
-# --- SCANNER ENGINE ---
+# --- SCANNER ENGINE (ASYNC) ---
 
 class AsyncScanner:
     def __init__(self, macs, portal, proxies, threads, skip_unl, unl_retries):
         self.macs = macs
         self.portal = portal
+        # Scoring-System: Jeder Proxy startet mit 10 Punkten
         self.proxies = deque([{'url': p, 'score': 10} for p in proxies])
         self.threads = threads
         self.skip_unl = skip_unl
         self.unl_retries = unl_retries
         self.queue = asyncio.Queue()
         self.retry_counts = {}
-        self.client = stb.AsyncStbClient()
+        self.client = stb.AsyncStbClient() # Nutzt die neue stb.py
 
     async def worker(self):
         while SCAN_STATE['running']:
@@ -119,7 +131,7 @@ class AsyncScanner:
             p_obj = self.proxies.popleft()
             
             try:
-                # Auto-Detect passiert hier drin automatisch (stb.py)
+                # Auto-Detect & Handshake in einem Rutsch
                 success, data = await self.client.quick_scan(self.portal, item['mac'], p_obj['url'])
                 SCAN_STATE['checked'] += 1
                 
@@ -135,13 +147,13 @@ class AsyncScanner:
                     save_config(conf)
                 
                 self.proxies.append(p_obj)
-            except Exception:
+            except:
                 p_obj['score'] -= 1
                 if p_obj['score'] > 0: self.proxies.append(p_obj)
                 
-                # Original UNLIMIT Logik
+                # Retry Logik
                 retries = self.retry_counts.get(item['mac'], 0)
-                if self.unl_retries or retries < 10:
+                if self.unl_retries or retries < 5:
                     self.retry_counts[item['mac']] = retries + 1
                     await self.queue.put(item)
                 else: SCAN_STATE['errors'] += 1
@@ -151,12 +163,12 @@ class AsyncScanner:
 
     async def run(self):
         for m in self.macs: await self.queue.put({'mac': m})
-        workers = [asyncio.create_task(self.worker()) for _ in range(self.threads)]
+        workers = [asyncio.create_task(self.worker()) for _ in range(min(self.threads, 200))]
         await self.queue.join()
         await self.client.close()
         SCAN_STATE['running'] = False
 
-# --- STANDARD API ENDPOINTS (Wie Original) ---
+# --- API ROUTEN ---
 
 @app.route('/')
 def index():
@@ -167,15 +179,22 @@ def index():
 def api_start():
     data = request.json
     conf = load_config()
-    SCAN_STATE.update({"running": True, "total": len(data.get('macs', [])), "checked": 0, "hits": 0, "errors": 0})
+    
+    macs_to_scan = data.get('macs', [])
+    portal_url = data.get('portal', '')
+    proxy_list = data.get('proxies', []) or conf.get('proxies', [])
+    
+    if not macs_to_scan or not portal_url:
+        return jsonify({"success": False, "error": "Fehlende MACs oder Portal URL"})
+
+    SCAN_STATE.update({"running": True, "total": len(macs_to_scan), "checked": 0, "hits": 0, "errors": 0})
     
     def run_loop():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         scanner = AsyncScanner(
-            data.get('macs', []), data.get('portal', ''), 
-            data.get('proxies', []) or conf.get('proxies', []),
-            int(data.get('threads', 100)), 
+            macs_to_scan, portal_url, proxy_list,
+            int(data.get('threads', 50)),
             data.get('skip_unlimited', False),
             conf['settings'].get('unlimited_retries', True)
         )
@@ -204,17 +223,6 @@ def api_proxies():
         conf['proxies'] = []; save_config(conf)
     return jsonify(conf.get('proxies', []))
 
-@app.route('/api/proxies/sources', methods=['GET', 'POST', 'DELETE'])
-@requires_auth
-def api_sources():
-    conf = load_config()
-    if request.method == 'POST':
-        conf['proxy_sources'] = request.json.get('sources', [])
-        save_config(conf)
-    elif request.method == 'DELETE':
-        conf['proxy_sources'] = []; save_config(conf)
-    return jsonify(conf.get('proxy_sources', []))
-
 @app.route('/api/found', methods=['GET', 'DELETE'])
 @requires_auth
 def api_found():
@@ -224,15 +232,16 @@ def api_found():
         return jsonify({"success": True})
     return jsonify(conf.get('found_macs', []))
 
-@app.route('/api/found/export')
+@app.route('/api/settings', methods=['GET', 'POST'])
 @requires_auth
-def api_export():
-    fmt = request.args.get("format", "txt")
-    found = load_config().get("found_macs", [])
-    if fmt == "json":
-        return Response(json.dumps(found, indent=2), mimetype="application/json")
-    lines = [f"Portal: {m['portal']} | MAC: {m['mac']} | Expiry: {m['expiry']}" for m in found]
-    return Response("\n".join(lines), mimetype="text/plain")
+def api_settings():
+    conf = load_config()
+    if request.method == 'POST':
+        conf['settings'].update(request.json)
+        save_config(conf)
+        return jsonify({"success": True})
+    return jsonify(conf.get('settings', {}))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    # Wir nutzen Port 5003 passend zur docker-compose.yml
+    app.run(host="0.0.0.0", port=PORT)
