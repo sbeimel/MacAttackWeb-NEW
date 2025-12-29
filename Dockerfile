@@ -25,16 +25,16 @@ COPY templates/ templates/
 COPY static/ static/
 
 # Set environment variables
-ENV HOST=0.0.0.0:5003
+ENV HOST=0.0.0.0:8080
 ENV CONFIG=/app/data/macattack.json
 ENV PYTHONUNBUFFERED=1
 
 # Expose the application port
-EXPOSE 5003
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5003/ || exit 1
+    CMD curl -f http://localhost:8080/ || exit 1
 
 # Run the application
 CMD ["python", "app.py"]
