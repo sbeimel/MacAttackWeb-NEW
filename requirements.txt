@@ -1,18 +1,7 @@
-# Core Flask Application
 Flask==3.0.0
 waitress==3.0.0
-
-# HTTP Requests and Proxy Support
 requests==2.31.0
-requests[socks]==2.31.0
-PySocks==1.7.1
-urllib3==2.0.7
-
-# Async Support
-gevent==24.2.1
-
-# Version Comparison
-semver==3.0.2
-
-# Additional Dependencies
-cryptography>=3.4.8
+# NEU: Das Herzstück für Speed
+aiohttp==3.9.1
+aiohttp-socks==0.8.4
+async-timeout==4.0.3
