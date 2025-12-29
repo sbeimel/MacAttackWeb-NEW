@@ -3,7 +3,7 @@ services:
     build: .
     container_name: macattack-web2
     ports:
-      - "5003:5003"
+      - "5003:8080"
     dns:
       - 1.1.1.1
       - 1.0.0.1
