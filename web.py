@@ -28,7 +28,15 @@ from app import (
     ProxyScorer, RetryQueue, generate_mac, load_mac_list,
     process_mac_chunk, generate_unique_mac, estimate_mac_space
 )
-from multi_portal_scanner import MultiPortalScannerManager
+
+# Handle multi-portal scanner import with circular import protection
+try:
+    from multi_portal_scanner import MultiPortalScannerManager
+    MULTI_PORTAL_AVAILABLE = True
+except ImportError as e:
+    print(f"Multi-portal scanner not available: {e}")
+    MultiPortalScannerManager = None
+    MULTI_PORTAL_AVAILABLE = False
 
 # Setup logging
 logger = logging.getLogger("MacAttack.web")
@@ -357,7 +365,11 @@ class AsyncScannerManager:
 scanner_manager = AsyncScannerManager()
 
 # Initialize Multi-Portal Scanner Manager
-multi_portal_manager = MultiPortalScannerManager(config, state, socketio)
+if MULTI_PORTAL_AVAILABLE and MultiPortalScannerManager:
+    multi_portal_manager = MultiPortalScannerManager(config, state, socketio)
+else:
+    multi_portal_manager = None
+    print("Multi-portal functionality disabled due to import issues")
 
 # ============== AUTHENTICATION ROUTES ==============
 
@@ -881,6 +893,9 @@ def api_multi_attack():
     """Multi-portal attack management API."""
     global config, state, multi_portal_manager
     
+    if not multi_portal_manager:
+        return jsonify({"error": "Multi-portal functionality not available"}), 503
+    
     data = request.json
     action = data.get('action')
     
@@ -942,6 +957,8 @@ def api_multi_attack():
             return jsonify({"error": message}), 400
     
     elif action == 'get_status':
+        if not multi_portal_manager:
+            return jsonify({"success": False, "error": "Multi-portal not available"})
         portal_status = multi_portal_manager.get_portal_status()
         return jsonify({"success": True, "portal_status": portal_status})
     
@@ -957,13 +974,14 @@ def handle_connect():
     # Send initial state
     scanner_manager._emit_update()
     
-    # Send multi-portal status
-    portal_status = multi_portal_manager.get_portal_status()
-    if portal_status:
-        emit('multi_portal_update', {
-            "multi_portal": True,
-            "portal_status": portal_status
-        })
+    # Send multi-portal status if available
+    if multi_portal_manager:
+        portal_status = multi_portal_manager.get_portal_status()
+        if portal_status:
+            emit('multi_portal_update', {
+                "multi_portal": True,
+                "portal_status": portal_status
+            })
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -975,13 +993,14 @@ def handle_request_update():
     """Handle manual update request."""
     scanner_manager._emit_update()
     
-    # Also send multi-portal status
-    portal_status = multi_portal_manager.get_portal_status()
-    if portal_status:
-        emit('multi_portal_update', {
-            "multi_portal": True,
-            "portal_status": portal_status
-        })
+    # Also send multi-portal status if available
+    if multi_portal_manager:
+        portal_status = multi_portal_manager.get_portal_status()
+        if portal_status:
+            emit('multi_portal_update', {
+                "multi_portal": True,
+                "portal_status": portal_status
+            })
 
 # ============== MAIN ==============
 

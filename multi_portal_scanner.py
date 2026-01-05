@@ -11,10 +11,6 @@ from typing import Dict, Any, List, Optional, Set
 from collections import defaultdict
 
 import stb
-from app import (
-    ProxyScorer, RetryQueue, generate_unique_mac, 
-    test_mac_worker, add_log, save_config, save_state
-)
 
 logger = logging.getLogger("MacAttack.multi_portal")
 
@@ -32,6 +28,9 @@ class MultiPortalScannerManager:
         """Start scanner for a single portal."""
         if portal_id in self.running_scanners:
             return False, "Scanner already running for this portal"
+        
+        # Import here to avoid circular imports
+        from app import add_log
         
         # Create scanner thread for this portal
         scanner_info = {
@@ -93,6 +92,8 @@ class MultiPortalScannerManager:
     
     def start_all_portals(self):
         """Start scanners for all enabled portals."""
+        from app import add_log
+        
         portals = self.config.get('portals', [])
         enabled_portals = [p for p in portals if p.get('enabled', True)]
         
@@ -158,6 +159,8 @@ class MultiPortalScannerManager:
     
     def _run_portal_scanner_thread(self, portal_id: str, portal_url: str):
         """Run the async scanner for a specific portal in its own event loop."""
+        from app import add_log
+        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -174,6 +177,8 @@ class MultiPortalScannerManager:
     
     async def _run_portal_scanner(self, portal_id: str, portal_url: str):
         """Main scanner coroutine for a specific portal."""
+        from app import ProxyScorer, RetryQueue, generate_unique_mac, add_log, save_config, save_state
+        
         scanner_info = self.scanners[portal_id]
         scanner_info['running'] = True
         
