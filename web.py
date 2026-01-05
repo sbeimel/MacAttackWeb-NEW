@@ -28,6 +28,7 @@ from app import (
     ProxyScorer, RetryQueue, generate_mac, load_mac_list,
     process_mac_chunk, generate_unique_mac, estimate_mac_space
 )
+from multi_portal_scanner import MultiPortalScannerManager
 
 # Setup logging
 logger = logging.getLogger("MacAttack.web")
@@ -354,6 +355,9 @@ class AsyncScannerManager:
             print(f"Error emitting update: {e}")
 
 scanner_manager = AsyncScannerManager()
+
+# Initialize Multi-Portal Scanner Manager
+multi_portal_manager = MultiPortalScannerManager(config, state, socketio)
 
 # ============== AUTHENTICATION ROUTES ==============
 
@@ -875,31 +879,71 @@ def api_proxy_management():
 @login_required
 def api_multi_attack():
     """Multi-portal attack management API."""
-    global config, state
+    global config, state, multi_portal_manager
     
     data = request.json
     action = data.get('action')
     
     if action == 'start_all':
-        portals = config.get('portals', [])
-        enabled_portals = [p for p in portals if p.get('enabled', True)]
+        success, message = multi_portal_manager.start_all_portals()
         
-        if not enabled_portals:
-            return jsonify({"error": "No enabled portals found"}), 400
-        
-        # TODO: Implement actual multi-portal scanning
-        add_log(state, f"🚀 Starting multi-portal attack on {len(enabled_portals)} portals", "info")
-        
-        return jsonify({
-            "success": True, 
-            "message": f"Started attacks on {len(enabled_portals)} portals",
-            "portals": enabled_portals
-        })
+        if success:
+            add_log(state, message, "info")
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"error": message}), 400
     
     elif action == 'stop_all':
-        # TODO: Implement stopping all attacks
-        add_log(state, "⏹ Stopping all multi-portal attacks", "warning")
-        return jsonify({"success": True, "message": "All attacks stopped"})
+        success, message = multi_portal_manager.stop_all_portals()
+        add_log(state, message, "warning")
+        return jsonify({"success": True, "message": message})
+    
+    elif action == 'start_single':
+        portal_id = data.get('portal_id')
+        portal_url = data.get('portal_url')
+        
+        if not portal_id or not portal_url:
+            return jsonify({"error": "Missing portal_id or portal_url"}), 400
+        
+        success, message = multi_portal_manager.start_single_portal(portal_id, portal_url)
+        
+        if success:
+            add_log(state, f"🚀 Started scanner for portal {portal_id}", "info")
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"error": message}), 400
+    
+    elif action == 'stop_single':
+        portal_id = data.get('portal_id')
+        
+        if not portal_id:
+            return jsonify({"error": "Missing portal_id"}), 400
+        
+        success, message = multi_portal_manager.stop_single_portal(portal_id)
+        
+        if success:
+            add_log(state, f"⏹️ Stopped scanner for portal {portal_id}", "warning")
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"error": message}), 400
+    
+    elif action == 'pause_single':
+        portal_id = data.get('portal_id')
+        
+        if not portal_id:
+            return jsonify({"error": "Missing portal_id"}), 400
+        
+        success, message = multi_portal_manager.pause_portal(portal_id)
+        
+        if success:
+            add_log(state, f"⏸️ Toggled pause for portal {portal_id}", "info")
+            return jsonify({"success": True, "message": message})
+        else:
+            return jsonify({"error": message}), 400
+    
+    elif action == 'get_status':
+        portal_status = multi_portal_manager.get_portal_status()
+        return jsonify({"success": True, "portal_status": portal_status})
     
     return jsonify({"error": "Unknown action"}), 400
 
@@ -912,6 +956,14 @@ def handle_connect():
     
     # Send initial state
     scanner_manager._emit_update()
+    
+    # Send multi-portal status
+    portal_status = multi_portal_manager.get_portal_status()
+    if portal_status:
+        emit('multi_portal_update', {
+            "multi_portal": True,
+            "portal_status": portal_status
+        })
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -922,6 +974,14 @@ def handle_disconnect():
 def handle_request_update():
     """Handle manual update request."""
     scanner_manager._emit_update()
+    
+    # Also send multi-portal status
+    portal_status = multi_portal_manager.get_portal_status()
+    if portal_status:
+        emit('multi_portal_update', {
+            "multi_portal": True,
+            "portal_status": portal_status
+        })
 
 # ============== MAIN ==============
 

@@ -321,7 +321,7 @@
                         <span>Retry Queue:</span>
                         <span id="retryQueue">0</span>
                     </div>
-                    <div class="info-row" id="proxy-stats-row">
+                    <div class="info-row" id="proxy-stats-row" style="display: none;">
                         <span>Proxy Stats:</span>
                         <span id="proxy-stats-info">-</span>
                     </div>
@@ -439,7 +439,7 @@
             </div>
         </div>
 
-        <!-- PROXIES TAB - IMPROVED -->
+        <!-- PROXIES TAB -->
         <div id="proxies" class="tab-content">
             <div class="panel">
                 <h2>Proxy Management</h2>
@@ -453,31 +453,6 @@
                     <button id="btn-remove-failed" class="btn btn-danger" title="Remove proxies that failed the last test">Remove Failed</button>
                     <button id="btn-reset-errors" class="btn btn-secondary">Reset Errors</button>
                     <button id="btn-clear-proxies" class="btn btn-danger">Clear All</button>
-                </div>
-            </div>
-
-            <!-- IMPROVED PROXY STATISTICS DISPLAY -->
-            <div class="panel" id="proxy-stats-panel">
-                <h2>Proxy Statistics</h2>
-                <div class="proxy-stats-summary" id="proxy-stats-summary" style="display: none;">
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <span class="stat-label">Total</span>
-                            <span class="stat-value" id="proxy-total">0</span>
-                        </div>
-                        <div class="stat-card success">
-                            <span class="stat-label">Working</span>
-                            <span class="stat-value" id="proxy-working">0</span>
-                        </div>
-                        <div class="stat-card error">
-                            <span class="stat-label">Blocked</span>
-                            <span class="stat-value" id="proxy-blocked">0</span>
-                        </div>
-                        <div class="stat-card error">
-                            <span class="stat-label">Failed</span>
-                            <span class="stat-value" id="proxy-failed">0</span>
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -514,6 +489,26 @@
             <div class="two-columns">
                 <div class="panel">
                     <h2>Proxies (<span id="proxy-count">0</span>)</h2>
+                    <div class="proxy-stats-summary" id="proxy-stats-summary" style="margin-bottom: 15px; display: none;">
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <span class="stat-label">Total</span>
+                                <span class="stat-value" id="proxy-total">0</span>
+                            </div>
+                            <div class="stat-card success">
+                                <span class="stat-label">Working</span>
+                                <span class="stat-value" id="proxy-working">0</span>
+                            </div>
+                            <div class="stat-card error">
+                                <span class="stat-label">Failed</span>
+                                <span class="stat-value" id="proxy-failed">0</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-label">Blocked</span>
+                                <span class="stat-value" id="proxy-blocked">0</span>
+                            </div>
+                        </div>
+                    </div>
                     <textarea id="proxy-list" placeholder="Enter proxies (one per line)&#10;Format: ip:port or socks5://ip:port"></textarea>
                     <button id="btn-save-proxies" class="btn btn-success">Save Proxies</button>
                 </div>
@@ -678,6 +673,10 @@
             updateDashboard(data);
         });
 
+        socket.on('multi_portal_update', function(data) {
+            updateMultiPortalDashboard(data);
+        });
+
         // Tab Navigation
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -769,7 +768,62 @@
             }, 3000);
         }
 
-        // Update dashboard with new data
+        // Update multi-portal dashboard with new data
+        function updateMultiPortalDashboard(data) {
+            if (!data.multi_portal || !data.portal_status) {
+                return;
+            }
+
+            // Update overall stats
+            document.getElementById('stat-tested').textContent = data.total_tested || 0;
+            document.getElementById('stat-hits').textContent = data.total_hits || 0;
+            document.getElementById('testRate').textContent = data.test_rate || '0/s';
+            document.getElementById('hitRate').textContent = data.hit_rate || '0%';
+
+            // Update running attacks display with portal data
+            runningAttacks.clear();
+            
+            for (const [portalId, status] of Object.entries(data.portal_status)) {
+                if (status.running) {
+                    runningAttacks.set(portalId, {
+                        id: portalId,
+                        portal: {
+                            id: portalId,
+                            name: `Portal ${portalId}`,
+                            url: status.portal_url
+                        },
+                        status: status.paused ? 'paused' : 'running',
+                        stats: {
+                            tested: status.tested,
+                            hits: status.hits,
+                            errors: 0
+                        },
+                        startTime: status.start_time * 1000, // Convert to milliseconds
+                        current_mac: status.current_mac,
+                        current_proxy: status.current_proxy
+                    });
+                }
+            }
+
+            updateAttacksList();
+
+            // Update hits and logs if available
+            if (data.found_macs) {
+                updateHitsList(data.found_macs);
+            }
+            
+            if (data.logs) {
+                updateLogsList(data.logs);
+            }
+
+            // Update button states
+            const hasRunningPortals = Object.values(data.portal_status).some(s => s.running);
+            const startMultiBtn = document.getElementById('btn-start-multi');
+            const stopAllBtn = document.getElementById('btn-stop-all');
+            
+            if (startMultiBtn) startMultiBtn.disabled = hasRunningPortals;
+            if (stopAllBtn) stopAllBtn.disabled = !hasRunningPortals;
+        }
         function updateDashboard(data) {
             // Update stats
             document.getElementById('stat-tested').textContent = data.tested || 0;
@@ -781,23 +835,93 @@
             // Update current status
             document.getElementById('currentMac').textContent = data.current_mac || '-';
             document.getElementById('currentProxy').textContent = data.current_proxy || '-';
+            
+            // Update current portal display
+            if (data.current_portal) {
+                document.getElementById('current-portal').textContent = data.current_portal;
+            }
 
-            // Update status indicator
+            // Update proxy stats display
+            if (data.proxy_stats && Object.keys(data.proxy_stats).length > 0) {
+                const proxyStatsRow = document.getElementById('proxy-stats-row');
+                if (proxyStatsRow) {
+                    proxyStatsRow.style.display = 'flex';
+                    
+                    // Calculate proxy statistics
+                    let working = 0, failed = 0, blocked = 0, total = 0;
+                    
+                    for (const [proxy, stats] of Object.entries(data.proxy_stats)) {
+                        total++;
+                        const successRate = parseFloat(stats.success_rate) || 0;
+                        const consecutiveFails = stats.consecutive_fails || 0;
+                        
+                        if (consecutiveFails >= 3) {
+                            failed++;
+                        } else if (consecutiveFails >= 1) {
+                            blocked++;
+                        } else if (successRate > 0) {
+                            working++;
+                        }
+                    }
+                    
+                    document.getElementById('proxy-stats-info').textContent = 
+                        `Working: ${working} | Blocked: ${blocked} | Failed: ${failed} | Total: ${total}`;
+                }
+            } else {
+                const proxyStatsRow = document.getElementById('proxy-stats-row');
+                if (proxyStatsRow) {
+                    proxyStatsRow.style.display = 'none';
+                }
+            }
+
+            // Update status indicator and button states
             const statusIndicator = document.getElementById('statusIndicator');
             const statusText = document.getElementById('scannerStatus');
+            const startBtn = document.getElementById('btn-start');
+            const stopBtn = document.getElementById('btn-stop-all');
+            const pauseBtn = document.getElementById('btn-pause');
+            
+            // Update running status from server data
+            if (data.running !== undefined) {
+                isRunning = data.running;
+            }
             
             if (data.paused) {
                 statusIndicator.className = 'status-indicator status-paused';
                 statusText.textContent = 'Paused';
                 isPaused = true;
+                
+                // Button states for paused
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (pauseBtn) {
+                    pauseBtn.disabled = false;
+                    pauseBtn.textContent = '▶ Resume';
+                }
             } else if (isRunning) {
                 statusIndicator.className = 'status-indicator status-running';
                 statusText.textContent = 'Running';
                 isPaused = false;
+                
+                // Button states for running
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (pauseBtn) {
+                    pauseBtn.disabled = false;
+                    pauseBtn.textContent = '⏸ Pause';
+                }
             } else {
                 statusIndicator.className = 'status-indicator status-stopped';
                 statusText.textContent = 'Stopped';
                 isPaused = false;
+                
+                // Button states for stopped
+                if (startBtn) startBtn.disabled = false;
+                if (stopBtn) stopBtn.disabled = true;
+                if (pauseBtn) {
+                    pauseBtn.disabled = true;
+                    pauseBtn.textContent = '⏸ Pause';
+                }
             }
 
             // Update hits list
@@ -813,6 +937,51 @@
             if (Math.random() < 0.1) {
                 loadMacStats();
             }
+
+            // Update running attacks display
+            updateRunningAttacksFromScanner(data);
+        }
+
+        // Update running attacks from scanner data
+        function updateRunningAttacksFromScanner(data) {
+            if (isRunning && !runningAttacks.has('current_scanner')) {
+                // Add current scanner as running attack
+                runningAttacks.set('current_scanner', {
+                    id: 'current_scanner',
+                    portal: {
+                        name: 'Current Portal',
+                        url: data.current_portal || 'Unknown'  // Use portal from data instead of form
+                    },
+                    status: data.paused ? 'paused' : 'running',
+                    stats: { 
+                        tested: data.tested || 0, 
+                        hits: data.hits || 0, 
+                        errors: 0 
+                    },
+                    startTime: Date.now()
+                });
+                selectedAttackId = 'current_scanner';
+            } else if (runningAttacks.has('current_scanner')) {
+                // Update existing attack
+                const attack = runningAttacks.get('current_scanner');
+                attack.status = data.paused ? 'paused' : (isRunning ? 'running' : 'stopped');
+                attack.stats = { 
+                    tested: data.tested || 0, 
+                    hits: data.hits || 0, 
+                    errors: 0 
+                };
+                attack.portal.url = data.current_portal || attack.portal.url;
+            }
+
+            if (!isRunning && runningAttacks.has('current_scanner')) {
+                // Remove when stopped
+                runningAttacks.delete('current_scanner');
+                if (selectedAttackId === 'current_scanner') {
+                    selectedAttackId = null;
+                }
+            }
+
+            updateAttacksList();
         }
 
         // Update hits list
@@ -856,18 +1025,71 @@
         // Update proxy statistics
         function updateProxyStats(stats) {
             const proxyStatsList = document.getElementById('proxy-stats-list');
+            const proxyStatsSummary = document.getElementById('proxy-stats-summary');
             
             if (Object.keys(stats).length === 0) {
                 proxyStatsList.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 20px;">No proxy statistics available yet.</div>';
+                if (proxyStatsSummary) proxyStatsSummary.style.display = 'none';
                 return;
             }
 
-            proxyStatsList.innerHTML = Object.entries(stats).map(([proxy, data]) => `
-                <div class="log-entry">
-                    <strong>${proxy}</strong><br>
-                    Success: ${data.success_rate} | Speed: ${data.avg_speed} | Requests: ${data.total_requests} | Fails: ${data.consecutive_fails}
-                </div>
-            `).join('');
+            // Calculate summary statistics
+            let working = 0, failed = 0, blocked = 0, total = 0;
+            
+            for (const [proxy, data] of Object.entries(stats)) {
+                total++;
+                const successRate = parseFloat(data.success_rate) || 0;
+                const consecutiveFails = data.consecutive_fails || 0;
+                
+                if (consecutiveFails >= 3) {
+                    failed++;
+                } else if (consecutiveFails >= 1) {
+                    blocked++;
+                } else if (successRate > 0) {
+                    working++;
+                }
+            }
+
+            // Update summary display
+            if (proxyStatsSummary) {
+                proxyStatsSummary.style.display = 'block';
+                document.getElementById('proxy-total').textContent = total;
+                document.getElementById('proxy-working').textContent = working;
+                document.getElementById('proxy-failed').textContent = failed;
+                document.getElementById('proxy-blocked').textContent = blocked;
+            }
+
+            // Update detailed statistics
+            proxyStatsList.innerHTML = Object.entries(stats).map(([proxy, data]) => {
+                const successRate = parseFloat(data.success_rate) || 0;
+                const consecutiveFails = data.consecutive_fails || 0;
+                
+                let statusClass = '';
+                let statusText = '';
+                
+                if (consecutiveFails >= 3) {
+                    statusClass = 'error';
+                    statusText = '❌ Failed';
+                } else if (consecutiveFails >= 1) {
+                    statusClass = 'warning';
+                    statusText = '⚠️ Blocked';
+                } else if (successRate > 0) {
+                    statusClass = 'success';
+                    statusText = '✅ Working';
+                } else {
+                    statusClass = '';
+                    statusText = '⚪ Unknown';
+                }
+                
+                return `
+                    <div class="log-entry ${statusClass}">
+                        <strong>${proxy}</strong> ${statusText}<br>
+                        Success: ${data.success_rate} | Speed: ${data.avg_speed} | 
+                        Requests: ${data.total_requests} | Fails: ${data.consecutive_fails}
+                        ${data.blocked_portals > 0 ? ` | Blocked Portals: ${data.blocked_portals}` : ''}
+                    </div>
+                `;
+            }).join('');
         }
 
         // Scanner control functions
@@ -877,6 +1099,15 @@
                 isRunning = true;
                 console.log('Scanner started');
                 showSuccessMessage('Scanner started successfully');
+                
+                // Update button states immediately
+                const startBtn = document.getElementById('btn-start');
+                const stopBtn = document.getElementById('btn-stop-all');
+                const pauseBtn = document.getElementById('btn-pause');
+                
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (pauseBtn) pauseBtn.disabled = false;
             } catch (error) {
                 // Error already handled by apiCall
             }
@@ -886,8 +1117,21 @@
             try {
                 const result = await apiCall('/api/stop', { method: 'POST' });
                 isRunning = false;
+                isPaused = false;
                 console.log('Scanner stopped');
                 showSuccessMessage('Scanner stopped');
+                
+                // Update button states immediately
+                const startBtn = document.getElementById('btn-start');
+                const stopBtn = document.getElementById('btn-stop-all');
+                const pauseBtn = document.getElementById('btn-pause');
+                
+                if (startBtn) startBtn.disabled = false;
+                if (stopBtn) stopBtn.disabled = true;
+                if (pauseBtn) {
+                    pauseBtn.disabled = true;
+                    pauseBtn.textContent = '⏸ Pause';
+                }
             } catch (error) {
                 // Error already handled by apiCall
             }
@@ -899,6 +1143,12 @@
                 isPaused = result.paused;
                 console.log('Scanner ' + (isPaused ? 'paused' : 'resumed'));
                 showSuccessMessage('Scanner ' + (isPaused ? 'paused' : 'resumed'));
+                
+                // Update button states immediately
+                const pauseBtn = document.getElementById('btn-pause');
+                if (pauseBtn) {
+                    pauseBtn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+                }
             } catch (error) {
                 // Error already handled by apiCall
             }
@@ -1550,7 +1800,7 @@
 
         // Event listeners
         document.getElementById('btn-start').addEventListener('click', startScanner);
-        document.getElementById('btn-stop-all').addEventListener('click', stopScanner);
+        document.getElementById('btn-stop-all').addEventListener('click', stopAllAttacks);
         document.getElementById('btn-pause').addEventListener('click', pauseScanner);
         document.getElementById('btn-save-settings').addEventListener('click', saveConfig);
         document.getElementById('btn-save-performance-settings').addEventListener('click', saveConfig);
@@ -1635,38 +1885,106 @@
 
         async function startMultiPortalAttack() {
             try {
-                const portals = await apiCall('/api/portals');
-                const enabledPortals = portals.filter(p => p.enabled);
+                const result = await apiCall('/api/multi_attack', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'start_all' })
+                });
 
-                if (enabledPortals.length === 0) {
-                    showErrorMessage('No enabled portals found');
-                    return;
-                }
+                showSuccessMessage(result.message || 'Multi-portal attack started');
+                
+                // Update button states
+                const startMultiBtn = document.getElementById('btn-start-multi');
+                const stopAllBtn = document.getElementById('btn-stop-all');
+                
+                if (startMultiBtn) startMultiBtn.disabled = true;
+                if (stopAllBtn) stopAllBtn.disabled = false;
+                
+            } catch (error) {
+                // Error already handled by apiCall
+            }
+        }
 
-                for (const portal of enabledPortals) {
-                    await startPortalAttack(portal);
-                }
+        async function stopAllAttacks() {
+            try {
+                const result = await apiCall('/api/multi_attack', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'stop_all' })
+                });
 
-                showSuccessMessage(`Started attacks on ${enabledPortals.length} portals`);
+                showSuccessMessage(result.message || 'All attacks stopped');
+                
+                // Update button states
+                const startMultiBtn = document.getElementById('btn-start-multi');
+                const stopAllBtn = document.getElementById('btn-stop-all');
+                
+                if (startMultiBtn) startMultiBtn.disabled = false;
+                if (stopAllBtn) stopAllBtn.disabled = true;
+                
+                // Clear running attacks display
+                runningAttacks.clear();
                 updateAttacksList();
+                
             } catch (error) {
                 // Error already handled by apiCall
             }
         }
 
         async function startPortalAttack(portal) {
-            const attackId = `attack_${portal.id}_${Date.now()}`;
-            
-            runningAttacks.set(attackId, {
-                id: attackId,
-                portal: portal,
-                status: 'running',
-                stats: { tested: 0, hits: 0, errors: 0 },
-                startTime: Date.now()
-            });
+            try {
+                const result = await apiCall('/api/multi_attack', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        action: 'start_single',
+                        portal_id: portal.id.toString(),
+                        portal_url: portal.url
+                    })
+                });
 
-            // Start the actual attack (this would integrate with the existing scanner)
-            // For now, we'll simulate it
+                showSuccessMessage(`Started attack on ${portal.name}`);
+                
+            } catch (error) {
+                // Error already handled by apiCall
+            }
+        }
+
+        async function stopPortalAttack(portal) {
+            try {
+                const result = await apiCall('/api/multi_attack', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        action: 'stop_single',
+                        portal_id: portal.id.toString()
+                    })
+                });
+
+                showSuccessMessage(`Stopped attack on ${portal.name}`);
+                
+            } catch (error) {
+                // Error already handled by apiCall
+            }
+        }
+
+        async function pausePortalAttack(portal) {
+            try {
+                const result = await apiCall('/api/multi_attack', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        action: 'pause_single',
+                        portal_id: portal.id.toString()
+                    })
+                });
+
+                showSuccessMessage(`Toggled pause for ${portal.name}`);
+                
+            } catch (error) {
+                // Error already handled by apiCall
+            }
+        }
             console.log(`Starting attack on portal: ${portal.name} (${portal.url})`);
         }
 
