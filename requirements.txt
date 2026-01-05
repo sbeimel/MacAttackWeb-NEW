@@ -1,18 +1,24 @@
-# Core Flask Application
+# MacAttack-Web v3.0 - Async Edition Requirements
+
+# Core async HTTP client
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# Web framework
 Flask==3.0.0
-waitress==3.0.0
+Flask-SocketIO==5.3.6
 
-# HTTP Requests and Proxy Support
+# HTTP client for sync operations
 requests==2.31.0
-requests[socks]==2.31.0
-PySocks==1.7.1
-urllib3==2.0.7
 
-# Async Support
-gevent==24.2.1
+# JSON handling
+ujson==5.8.0
 
-# Version Comparison
-semver==3.0.2
+# Logging
+colorlog==6.8.0
 
-# Additional Dependencies
-cryptography>=3.4.8
+# Development tools (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+black==23.11.0
+flake8==6.1.0
