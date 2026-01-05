@@ -116,6 +116,10 @@ class AsyncScannerManager:
         if self.running:
             return False
         
+        # Reset stop flag
+        state["stop_requested"] = False
+        state["paused"] = False
+        
         self.thread = threading.Thread(target=self._run_scanner_thread, daemon=True)
         self.thread.start()
         return True
@@ -125,7 +129,9 @@ class AsyncScannerManager:
         if not self.running:
             return False
         
-        state["paused"] = True
+        # Set stop flags
+        state["paused"] = False  # Unpause to allow stop
+        state["stop_requested"] = True
         self.running = False
         
         if self.loop and self.loop.is_running():
@@ -475,7 +481,11 @@ def start_scanner():
 @login_required
 def stop_scanner():
     """Stop the scanner."""
+    global state
+    
     if scanner_manager.stop():
+        state["stop_requested"] = True  # Signal to stop
+        state["paused"] = False  # Unpause if paused
         add_log(state, "⏹️ Scanner stopped", "warning")
         return jsonify({"success": True})
     else:

@@ -41,9 +41,10 @@ class DNSCache:
         # Resolve and cache
         try:
             loop = asyncio.get_event_loop()
-            ip = await loop.getaddrinfo(hostname, None, family=socket.AF_INET)
-            if ip:
-                resolved_ip = ip[0][4][0]
+            # Use proper DNS resolution
+            result = await loop.getaddrinfo(hostname, None, family=socket.AF_INET)
+            if result:
+                resolved_ip = result[0][4][0]
                 self.cache[hostname] = (resolved_ip, now)
                 return resolved_ip
         except Exception as e:

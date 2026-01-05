@@ -42,7 +42,7 @@ DEFAULT_CONFIG = {
         "timeout": 15,
         "max_retries": 3,
         "max_proxy_errors": 10,
-        "chunk_size": 1000,
+        "chunk_size": 10,  # Reduced from 1000 to 10 for more realistic testing
         "auto_save": True,
         "quickscan_only": False,
         "debug_mode": False,
@@ -388,6 +388,11 @@ async def test_mac_worker(session: aiohttp.ClientSession, portal_url: str, mac: 
     - error_type: None (success/portal error), "dead", "slow", "blocked"
     """
     try:
+        # Check if session is still open
+        if session.closed:
+            logger.warning(f"Session closed for MAC {mac}, skipping")
+            return False, {"mac": mac, "error": "Session closed"}, "session_closed"
+        
         success, result = await stb.test_mac_async(session, portal_url, mac, proxy, timeout, quickscan_only)
         return success, result, None
     
@@ -622,8 +627,20 @@ async def run_scanner(config: Dict[str, Any], state: Dict[str, Any], mac_list: O
                     save_config(config)
                     save_state(state)
                 
-                # Brief pause between chunks
-                await asyncio.sleep(0.1)
+                # Brief pause between chunks to allow pause/stop
+                await asyncio.sleep(0.5)  # Increased from 0.1 to 0.5 seconds
+                
+                # Check for pause/stop more frequently
+                if state["paused"]:
+                    add_log(state, "⏸️ Scanner paused", "warning")
+                    while state["paused"] and not state.get("stop_requested", False):
+                        await asyncio.sleep(1)  # Wait while paused
+                    
+                    if state.get("stop_requested", False):
+                        add_log(state, "⏹️ Scanner stop requested", "warning")
+                        break
+                    else:
+                        add_log(state, "▶️ Scanner resumed", "info")
         
         except KeyboardInterrupt:
             add_log(state, "⏹ Scanner stopped by user", "warning")
