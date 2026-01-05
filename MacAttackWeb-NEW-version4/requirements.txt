@@ -1,0 +1,7 @@
+Flask==3.0.0
+waitress==3.0.0
+requests==2.31.0
+# NEU: Das Herzstück für Speed
+aiohttp==3.9.1
+aiohttp-socks==0.8.4
+async-timeout==4.0.3

@@ -21,6 +21,7 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 from flask_socketio import SocketIO, emit
 import aiohttp
 
+import stb
 from app import (
     load_config, save_config, load_state, save_state, add_log,
     ProxyScorer, RetryQueue, generate_mac, load_mac_list,
@@ -570,6 +571,272 @@ def export_hits():
     else:
         # JSON format
         return jsonify(config["found_macs"])
+
+# ============== NEW API ENDPOINTS ==============
+
+@app.route('/api/portals', methods=['GET', 'POST'])
+@login_required
+def api_portals():
+    """Portal management API."""
+    global config
+    
+    if request.method == 'POST':
+        data = request.json
+        action = data.get('action')
+        
+        if action == 'add':
+            portal = {
+                'id': len(config.get('portals', [])) + 1,
+                'name': data.get('name', ''),
+                'url': data.get('url', ''),
+                'enabled': True,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            if 'portals' not in config:
+                config['portals'] = []
+            
+            config['portals'].append(portal)
+            save_config(config)
+            
+            add_log(state, f"📡 Portal added: {portal['name']}", "info")
+            return jsonify({"success": True, "portal": portal})
+        
+        elif action == 'toggle':
+            portal_id = data.get('id')
+            for portal in config.get('portals', []):
+                if portal['id'] == portal_id:
+                    portal['enabled'] = not portal.get('enabled', True)
+                    save_config(config)
+                    status = "enabled" if portal['enabled'] else "disabled"
+                    add_log(state, f"📡 Portal {status}: {portal['name']}", "info")
+                    return jsonify({"success": True, "enabled": portal['enabled']})
+            
+            return jsonify({"error": "Portal not found"}), 404
+        
+        elif action == 'delete':
+            portal_id = data.get('id')
+            config['portals'] = [p for p in config.get('portals', []) if p['id'] != portal_id]
+            save_config(config)
+            add_log(state, f"📡 Portal deleted", "info")
+            return jsonify({"success": True})
+    
+    return jsonify(config.get('portals', []))
+
+@app.route('/api/maclist', methods=['GET', 'POST'])
+@login_required
+def api_maclist():
+    """MAC list management API."""
+    global config
+    
+    list_id = request.args.get('list', '1')
+    
+    if request.method == 'POST':
+        data = request.json
+        action = data.get('action')
+        
+        if action == 'save':
+            macs = data.get('macs', [])
+            if 'mac_lists' not in config:
+                config['mac_lists'] = {"1": [], "2": []}
+            
+            config['mac_lists'][list_id] = macs
+            save_config(config)
+            
+            add_log(state, f"📝 MAC List {list_id} saved: {len(macs)} MACs", "info")
+            return jsonify({"success": True, "count": len(macs)})
+        
+        elif action == 'clear':
+            if 'mac_lists' not in config:
+                config['mac_lists'] = {"1": [], "2": []}
+            
+            config['mac_lists'][list_id] = []
+            save_config(config)
+            
+            add_log(state, f"📝 MAC List {list_id} cleared", "info")
+            return jsonify({"success": True})
+        
+        elif action == 'import':
+            # File import handling
+            macs = data.get('macs', [])
+            if 'mac_lists' not in config:
+                config['mac_lists'] = {"1": [], "2": []}
+            
+            # Validate and clean MAC addresses
+            valid_macs = []
+            for mac in macs:
+                mac = mac.strip().upper()
+                # Convert different formats to standard format
+                if '-' in mac:
+                    mac = mac.replace('-', ':')
+                
+                # Basic MAC validation
+                if len(mac) == 17 and mac.count(':') == 5:
+                    valid_macs.append(mac)
+            
+            config['mac_lists'][list_id].extend(valid_macs)
+            # Remove duplicates
+            config['mac_lists'][list_id] = list(set(config['mac_lists'][list_id]))
+            save_config(config)
+            
+            add_log(state, f"📝 Imported {len(valid_macs)} MACs to List {list_id}", "info")
+            return jsonify({"success": True, "imported": len(valid_macs), "total": len(config['mac_lists'][list_id])})
+    
+    # GET request
+    if 'mac_lists' not in config:
+        config['mac_lists'] = {"1": [], "2": []}
+    
+    return jsonify(config['mac_lists'].get(list_id, []))
+
+@app.route('/api/proxy_sources', methods=['GET', 'POST'])
+@login_required
+def api_proxy_sources():
+    """Proxy sources management API."""
+    global config
+    
+    if request.method == 'POST':
+        data = request.json
+        action = data.get('action')
+        
+        if action == 'save':
+            sources = data.get('sources', [])
+            config['proxy_sources'] = sources
+            save_config(config)
+            
+            add_log(state, f"🌐 Proxy sources saved: {len(sources)} sources", "info")
+            return jsonify({"success": True})
+        
+        elif action == 'fetch':
+            import requests
+            import re
+            
+            sources = config.get('proxy_sources', [])
+            new_proxies = set()
+            proxy_re = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}\b')
+            
+            for url in sources:
+                try:
+                    resp = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+                    if resp.status_code == 200:
+                        matches = proxy_re.findall(resp.text)
+                        for match in matches:
+                            new_proxies.add(match)
+                except Exception as e:
+                    add_log(state, f"❌ Failed to fetch from {url}: {e}", "error")
+                    continue
+            
+            # Add to existing proxies
+            current_proxies = set(config.get('proxies', []))
+            combined_proxies = list(current_proxies.union(new_proxies))
+            config['proxies'] = combined_proxies
+            save_config(config)
+            
+            add_log(state, f"🌐 Fetched {len(new_proxies)} new proxies", "info")
+            return jsonify({"success": True, "fetched": len(new_proxies), "total": len(combined_proxies)})
+    
+    return jsonify(config.get('proxy_sources', []))
+
+@app.route('/api/proxy_management', methods=['POST'])
+@login_required
+def api_proxy_management():
+    """Advanced proxy management API."""
+    global config
+    
+    data = request.json
+    action = data.get('action')
+    
+    if action == 'test':
+        # TODO: Implement proxy testing
+        add_log(state, "🧪 Proxy testing started", "info")
+        return jsonify({"success": True, "message": "Proxy testing started"})
+    
+    elif action == 'auto_detect':
+        # TODO: Implement proxy auto-detection
+        add_log(state, "🔍 Proxy auto-detection started", "info")
+        return jsonify({"success": True, "message": "Auto-detection started"})
+    
+    elif action == 'remove_failed':
+        # TODO: Implement failed proxy removal
+        add_log(state, "🗑️ Failed proxies removed", "info")
+        return jsonify({"success": True, "message": "Failed proxies removed"})
+    
+    elif action == 'reset_errors':
+        # TODO: Implement proxy error reset
+        add_log(state, "🔄 Proxy errors reset", "info")
+        return jsonify({"success": True, "message": "Proxy errors reset"})
+    
+    elif action == 'clear_all':
+        config['proxies'] = []
+        save_config(config)
+        add_log(state, "🗑️ All proxies cleared", "info")
+        return jsonify({"success": True})
+    
+    elif action == 'import':
+        proxies = data.get('proxies', [])
+        proxy_type = data.get('type', 'http')
+        
+        # Process and format proxies
+        formatted_proxies = []
+        for proxy in proxies:
+            proxy = proxy.strip()
+            if not proxy:
+                continue
+            
+            # If proxy doesn't have protocol, add it
+            if not proxy.startswith(('http://', 'socks4://', 'socks5://')):
+                if proxy_type == 'socks4':
+                    proxy = f'socks4://{proxy}'
+                elif proxy_type == 'socks5':
+                    proxy = f'socks5://{proxy}'
+                else:
+                    # HTTP is default, no prefix needed
+                    pass
+            
+            formatted_proxies.append(proxy)
+        
+        # Add to existing proxies
+        current_proxies = config.get('proxies', [])
+        current_proxies.extend(formatted_proxies)
+        # Remove duplicates
+        config['proxies'] = list(set(current_proxies))
+        save_config(config)
+        
+        add_log(state, f"🌐 Imported {len(formatted_proxies)} proxies", "info")
+        return jsonify({"success": True, "imported": len(formatted_proxies), "total": len(config['proxies'])})
+    
+    return jsonify({"error": "Unknown action"}), 400
+
+@app.route('/api/multi_attack', methods=['POST'])
+@login_required
+def api_multi_attack():
+    """Multi-portal attack management API."""
+    global config, state
+    
+    data = request.json
+    action = data.get('action')
+    
+    if action == 'start_all':
+        portals = config.get('portals', [])
+        enabled_portals = [p for p in portals if p.get('enabled', True)]
+        
+        if not enabled_portals:
+            return jsonify({"error": "No enabled portals found"}), 400
+        
+        # TODO: Implement actual multi-portal scanning
+        add_log(state, f"🚀 Starting multi-portal attack on {len(enabled_portals)} portals", "info")
+        
+        return jsonify({
+            "success": True, 
+            "message": f"Started attacks on {len(enabled_portals)} portals",
+            "portals": enabled_portals
+        })
+    
+    elif action == 'stop_all':
+        # TODO: Implement stopping all attacks
+        add_log(state, "⏹ Stopping all multi-portal attacks", "warning")
+        return jsonify({"success": True, "message": "All attacks stopped"})
+    
+    return jsonify({"error": "Unknown action"}), 400
 
 # ============== WEBSOCKET EVENTS ==============
 

@@ -34,6 +34,9 @@ DEFAULT_CONFIG = {
     "mac_prefix": "00:1A:79",
     "proxies": [],
     "found_macs": [],
+    "portals": [],  # New: Portal management
+    "mac_lists": {"1": [], "2": []},  # New: MAC lists
+    "proxy_sources": [],  # New: Proxy sources
     "settings": {
         "max_workers": 50,
         "timeout": 15,
@@ -42,6 +45,16 @@ DEFAULT_CONFIG = {
         "chunk_size": 1000,
         "auto_save": True,
         "quickscan_only": False,
+        "debug_mode": False,
+        "connections_per_host": 5,
+        "requests_per_minute_per_proxy": 30,
+        "min_delay_between_requests": 0.5,
+        # New settings
+        "use_proxies": True,
+        "unlimited_retries": False,
+        "proxy_test_threads": 50,
+        "max_proxy_errors": 3,
+        "proxy_connections": 5,
     }
 }
 

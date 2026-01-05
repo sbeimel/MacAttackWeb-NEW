@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MacAttack-Web - Setup</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .setup-container {
+            max-width: 500px;
+            margin: 100px auto;
+            padding: 40px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .setup-container h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            color: var(--accent);
+        }
+        .setup-container .subtitle {
+            text-align: center;
+            color: var(--text-secondary);
+            margin-bottom: 30px;
+        }
+        .setup-container .form-group {
+            margin-bottom: 20px;
+        }
+        .setup-container label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+        .setup-container input[type="text"],
+        .setup-container input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 16px;
+        }
+        .setup-container input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .setup-container .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 30px;
+        }
+        .setup-container .btn {
+            flex: 1;
+            padding: 14px;
+            font-size: 16px;
+        }
+        .setup-container .btn-skip {
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+        }
+        .setup-container .btn-skip:hover {
+            background: var(--border);
+        }
+        .setup-container .warning {
+            background: rgba(255, 193, 7, 0.1);
+            border: 1px solid #ffc107;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 20px;
+            color: #ffc107;
+            font-size: 14px;
+        }
+        .setup-container .error {
+            background: rgba(220, 53, 69, 0.1);
+            border: 1px solid #dc3545;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 10px;
+            color: #dc3545;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="setup-container">
+        <h1>🎯 MacAttack-Web</h1>
+        <p class="subtitle">Initial Setup - v{{ version }}</p>
+        
+        <form id="setup-form">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" placeholder="admin" autocomplete="username">
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="Enter password (min. 4 characters)" autocomplete="new-password">
+            </div>
+            
+            <div class="form-group">
+                <label for="password2">Confirm Password</label>
+                <input type="password" id="password2" name="password2" placeholder="Confirm password" autocomplete="new-password">
+            </div>
+            
+            <div class="error" id="error-msg"></div>
+            
+            <div class="btn-group">
+                <button type="button" class="btn btn-skip" id="btn-skip">Skip (No Auth)</button>
+                <button type="submit" class="btn btn-success">Setup Authentication</button>
+            </div>
+        </form>
+        
+        <div class="warning">
+            ⚠️ If you skip authentication, anyone with access to this URL can use MacAttack-Web.
+            You can enable authentication later in Settings.
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('setup-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const password2 = document.getElementById('password2').value;
+            const errorEl = document.getElementById('error-msg');
+            
+            errorEl.style.display = 'none';
+            
+            if (!username) {
+                errorEl.textContent = 'Please enter a username';
+                errorEl.style.display = 'block';
+                return;
+            }
+            
+            if (password.length < 4) {
+                errorEl.textContent = 'Password must be at least 4 characters';
+                errorEl.style.display = 'block';
+                return;
+            }
+            
+            if (password !== password2) {
+                errorEl.textContent = 'Passwords do not match';
+                errorEl.style.display = 'block';
+                return;
+            }
+            
+            try {
+                const res = await fetch('/setup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    alert('Authentication configured! You will now be prompted to log in.');
+                    window.location.href = '/';
+                } else {
+                    errorEl.textContent = data.error || 'Setup failed';
+                    errorEl.style.display = 'block';
+                }
+            } catch (err) {
+                errorEl.textContent = 'Connection error';
+                errorEl.style.display = 'block';
+            }
+        });
+        
+        document.getElementById('btn-skip').addEventListener('click', async () => {
+            if (!confirm('Are you sure you want to skip authentication? Anyone with access to this URL will be able to use MacAttack-Web.')) {
+                return;
+            }
+            
+            try {
+                const res = await fetch('/setup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ skip: true })
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    window.location.href = '/';
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        });
+    </script>
+</body>
+</html>
