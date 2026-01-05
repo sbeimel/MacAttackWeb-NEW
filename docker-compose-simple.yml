@@ -8,7 +8,7 @@ services:
       dockerfile: Dockerfile
     container_name: macattack-web
     # Use host network to access wg0 interface
-    network_mode: "host"
+    network_mode: "wg0"
     volumes:
       # Persistent data directory
       - ./data:/app/data
