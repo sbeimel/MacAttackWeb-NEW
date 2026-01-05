@@ -77,19 +77,17 @@ class OptimizedConnector:
             limit=min(self.max_workers, 500),     # Total connections
             limit_per_host=self.connections_per_host,  # CONFIGURABLE connections per host
             
-            # Connection reuse - CAREFUL
-            keepalive_timeout=30,                 # Shorter keepalive (30s instead of 60s)
-            enable_cleanup_closed=True,           # Clean up quickly
-            
             # Anti-detection measures
             use_dns_cache=True,                   # DNS caching OK
             resolver=resolver,                    # Optional resolver
             
-            # FORCE connection closing for proxy rotation
-            force_close=True,                     # IMPORTANT: Don't reuse connections across proxies!
+            # Connection management - choose one approach
+            force_close=False,                    # Allow connection reuse for better performance
+            keepalive_timeout=30,                 # Connection keepalive (30s)
+            enable_cleanup_closed=True,           # Clean up closed connections
             
-            # Connection timeout (use ttl_dns_cache instead of sock_* parameters)
-            ttl_dns_cache=300,                    # DNS cache TTL (5 minutes)
+            # DNS cache TTL
+            ttl_dns_cache=300,                    # 5 minutes DNS cache
         )
     
     def get_connector(self) -> aiohttp.TCPConnector:

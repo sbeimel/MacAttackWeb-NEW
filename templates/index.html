@@ -784,6 +784,51 @@
             if (Math.random() < 0.1) {
                 loadMacStats();
             }
+
+            // Update running attacks display
+            updateRunningAttacksFromScanner(data);
+        }
+
+        // Update running attacks from scanner data
+        function updateRunningAttacksFromScanner(data) {
+            if (isRunning && !runningAttacks.has('current_scanner')) {
+                // Add current scanner as running attack
+                runningAttacks.set('current_scanner', {
+                    id: 'current_scanner',
+                    portal: {
+                        name: 'Current Portal',
+                        url: document.getElementById('attack-url').value || 'Unknown'
+                    },
+                    status: data.paused ? 'paused' : 'running',
+                    stats: { 
+                        tested: data.tested || 0, 
+                        hits: data.hits || 0, 
+                        errors: 0 
+                    },
+                    startTime: Date.now()
+                });
+                selectedAttackId = 'current_scanner';
+            } else if (runningAttacks.has('current_scanner')) {
+                // Update existing attack
+                const attack = runningAttacks.get('current_scanner');
+                attack.status = data.paused ? 'paused' : (isRunning ? 'running' : 'stopped');
+                attack.stats = { 
+                    tested: data.tested || 0, 
+                    hits: data.hits || 0, 
+                    errors: 0 
+                };
+                attack.portal.url = document.getElementById('attack-url').value || attack.portal.url;
+            }
+
+            if (!isRunning && runningAttacks.has('current_scanner')) {
+                // Remove when stopped
+                runningAttacks.delete('current_scanner');
+                if (selectedAttackId === 'current_scanner') {
+                    selectedAttackId = null;
+                }
+            }
+
+            updateAttacksList();
         }
 
         // Update hits list
