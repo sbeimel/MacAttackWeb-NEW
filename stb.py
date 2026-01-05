@@ -88,9 +88,8 @@ class OptimizedConnector:
             # FORCE connection closing for proxy rotation
             force_close=True,                     # IMPORTANT: Don't reuse connections across proxies!
             
-            # Timeouts - reasonable
-            sock_connect=5,                       # Longer connect timeout
-            sock_read=15,                         # Longer read timeout
+            # Connection timeout (use ttl_dns_cache instead of sock_* parameters)
+            ttl_dns_cache=300,                    # DNS cache TTL (5 minutes)
         )
     
     def get_connector(self) -> aiohttp.TCPConnector:
