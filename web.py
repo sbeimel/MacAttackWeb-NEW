@@ -107,13 +107,28 @@ scanner_session = None
 mac_list = None
 
 # Load MAC list if available
-mac_list_path = DATA_DIR / "macs.txt"
-if mac_list_path.exists():
-    mac_list = load_mac_list(str(mac_list_path))
+mac_list = None
+
+# First try to load from config (web interface)
+if config.get("mac_lists", {}).get("1"):
+    mac_list = config["mac_lists"]["1"]
+    logger.info(f"Loaded {len(mac_list)} MACs from config (List 1)")
+elif config.get("mac_lists", {}).get("2"):
+    mac_list = config["mac_lists"]["2"] 
+    logger.info(f"Loaded {len(mac_list)} MACs from config (List 2)")
 else:
-    # Fallback to old location
-    if Path("macs.txt").exists():
+    # Try to load from file
+    mac_list_path = DATA_DIR / "macs.txt"
+    
+    if mac_list_path.exists() and mac_list_path.is_file():
+        mac_list = load_mac_list(str(mac_list_path))
+        logger.info(f"Loaded MAC list from {mac_list_path}")
+    elif Path("macs.txt").exists() and Path("macs.txt").is_file():
+        # Fallback to old location
         mac_list = load_mac_list("macs.txt")
+        logger.info("Loaded MAC list from ./macs.txt")
+    else:
+        logger.info("No MAC list found - will use random MAC generation")
 
 # ============== ASYNC SCANNER INTEGRATION ==============
 

@@ -295,12 +295,28 @@ def estimate_mac_space(prefix: str) -> int:
 def load_mac_list(file_path: str) -> List[str]:
     """Load MAC list from file."""
     try:
+        # Check if path exists and is a file (not directory)
+        path = Path(file_path)
+        if not path.exists():
+            logger.warning(f"MAC list file {file_path} not found")
+            return []
+        
+        if path.is_dir():
+            logger.warning(f"MAC list path {file_path} is a directory, not a file")
+            return []
+        
         with open(file_path, 'r') as f:
             macs = [line.strip() for line in f if line.strip()]
         logger.info(f"Loaded {len(macs)} MACs from {file_path}")
         return macs
     except FileNotFoundError:
         logger.warning(f"MAC list file {file_path} not found")
+        return []
+    except IsADirectoryError:
+        logger.warning(f"MAC list path {file_path} is a directory, not a file")
+        return []
+    except Exception as e:
+        logger.error(f"Error loading MAC list from {file_path}: {e}")
         return []
 
 # ============== STATE MANAGEMENT ==============
