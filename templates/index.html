@@ -463,6 +463,15 @@
             </div>
 
             <div class="control-group">
+                <div class="input-group" style="flex: 1;">
+                    <label>
+                        <input type="checkbox" id="debugMode" style="margin-right: 8px;">
+                        Debug Mode (requires restart)
+                    </label>
+                </div>
+            </div>
+
+            <div class="control-group">
                 <button class="btn btn-success" onclick="saveConfig()">💾 Save Config</button>
                 <button class="btn btn-secondary" onclick="loadConfig()">📁 Load Config</button>
                 <button class="btn btn-secondary" onclick="exportHits('json')">📤 Export JSON</button>
@@ -776,6 +785,7 @@
                 document.getElementById('maxWorkers').value = config.settings?.max_workers || 50;
                 document.getElementById('chunkSize').value = config.settings?.chunk_size || 1000;
                 document.getElementById('timeout').value = config.settings?.timeout || 15;
+                document.getElementById('debugMode').checked = config.settings?.debug_mode || false;
                 
                 console.log('Configuration loaded');
             } catch (error) {
@@ -792,6 +802,7 @@
                     max_workers: parseInt(document.getElementById('maxWorkers').value),
                     chunk_size: parseInt(document.getElementById('chunkSize').value),
                     timeout: parseInt(document.getElementById('timeout').value),
+                    debug_mode: document.getElementById('debugMode').checked,
                     max_retries: 3,
                     max_proxy_errors: 10,
                     auto_save: true,
@@ -806,7 +817,11 @@
                     body: JSON.stringify(config)
                 });
                 
-                alert('Configuration saved successfully!');
+                if (document.getElementById('debugMode').checked !== (config.settings?.debug_mode || false)) {
+                    alert('Configuration saved! Restart required for debug mode changes.');
+                } else {
+                    alert('Configuration saved successfully!');
+                }
             } catch (error) {
                 // Error already handled by apiCall
             }

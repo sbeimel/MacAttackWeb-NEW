@@ -1,76 +1,36 @@
-# MacAttack-Web v3.0 - Production Docker Compose
+# MacAttack-Web v3.0 - Simple Setup
 version: '3.8'
 
 services:
-  macattack-web:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  macattack:
+    build: .
     container_name: macattack-web
     ports:
-      - "5000:5000"
+      - "5005:5005"
     volumes:
-      # Persistent data directory
       - ./data:/app/data
-      # Optional: Mount MAC list
       - ./macs.txt:/app/data/macs.txt:ro
     environment:
       - PYTHONUNBUFFERED=1
-      - FLASK_ENV=production
     restart: unless-stopped
-    # Use WireGuard network interface
-    network_mode: "container:wireguard"
-    depends_on:
-      - wireguard
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/api/state"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    networks:
+      - wg0
     labels:
       - "com.macattack.version=3.0"
-      - "com.macattack.description=Async IPTV MAC Scanner"
 
-  # WireGuard VPN Container
-  wireguard:
-    image: linuxserver/wireguard:latest
-    container_name: macattack-wireguard
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/Berlin
-    volumes:
-      - ./wireguard:/config
-      - /lib/modules:/lib/modules:ro
-    ports:
-      - "5000:5000"  # MacAttack Web Interface
-      - "51820:51820/udp"  # WireGuard
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-    labels:
-      - "com.macattack.service=wireguard"
-
-  # Optional: Nginx Reverse Proxy for Production
   nginx:
     image: nginx:alpine
     container_name: macattack-nginx
     ports:
-      - "80:80"
-      - "443:443"
+      - "5006:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
     depends_on:
-      - macattack-web
+      - macattack
     restart: unless-stopped
-    profiles:
-      - production
+    networks:
+      - wg0
 
-volumes:
-  macattack_data:
-    driver: local
+networks:
+  wg0:
+    external: true

@@ -604,11 +604,14 @@ if __name__ == '__main__':
     print(f"Max Workers: {config['settings']['max_workers']}")
     print(f"Chunk Size: {config['settings']['chunk_size']}")
     
+    debug_mode = config['settings'].get('debug_mode', False)
+    print(f"Debug Mode: {'ENABLED' if debug_mode else 'DISABLED'}")
+    
     if mac_list:
         print(f"MAC List: {len(mac_list)} MACs loaded")
     
-    print("\n🌐 Starting web server on http://localhost:5000")
-    print("📊 Dashboard: http://localhost:5000")
-    print("🔧 API: http://localhost:5000/api/")
+    print("\n🌐 Starting web server on http://localhost:5005")
+    print("📊 Dashboard: http://localhost:5005")
+    print("🔧 API: http://localhost:5005/api/")
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5005, debug=debug_mode, allow_unsafe_werkzeug=True)
