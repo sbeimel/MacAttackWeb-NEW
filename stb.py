@@ -14,7 +14,7 @@ import time
 import random
 import logging
 from urllib.parse import urlparse, quote
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 import socket
 
 logger = logging.getLogger("MacAttack.stb")
