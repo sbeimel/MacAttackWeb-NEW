@@ -43,7 +43,10 @@ if [ ! -f /app/data/config.json ]; then
     "chunk_size": 1000,
     "auto_save": true,
     "quickscan_only": false,
-    "debug_mode": false
+    "debug_mode": false,
+    "connections_per_host": 5,
+    "requests_per_minute_per_proxy": 30,
+    "min_delay_between_requests": 0.5
   }
 }
 CONFIG

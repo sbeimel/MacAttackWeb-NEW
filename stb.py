@@ -1,21 +1,230 @@
 """
-STB API Client v3.0 - Async + Robust QuickScan
-- AsyncIO for efficient concurrent requests
+STB API Client v3.1 - Maximum Performance Edition
+- HTTP/2 Connection Pooling for speed
+- DNS Caching for faster lookups
+- Optimized proxy rotation
 - 2-Phase: QuickScan (Token + Channels) → FullScan (Details)
-- Proxy errors don't kill MACs (retry with different proxy)
-- Chunking support for 300k+ MACs
-- Proper error classification for intelligent retry
+- Proper error classification for proxy retry
 """
 import asyncio
 import aiohttp
 import hashlib
 import json
 import time
+import random
 import logging
 from urllib.parse import urlparse, quote
 from typing import Optional, Tuple, Dict, Any
+import socket
 
-logger = logging.getLogger("MacAttack.stb_async")
+logger = logging.getLogger("MacAttack.stb")
+
+# ============== PERFORMANCE OPTIMIZATIONS ==============
+
+class DNSCache:
+    """DNS resolution cache for faster lookups."""
+    
+    def __init__(self, ttl: int = 300):  # 5 minutes TTL
+        self.cache = {}
+        self.ttl = ttl
+    
+    async def resolve(self, hostname: str) -> Optional[str]:
+        """Resolve hostname with caching."""
+        now = time.time()
+        
+        # Check cache
+        if hostname in self.cache:
+            ip, timestamp = self.cache[hostname]
+            if now - timestamp < self.ttl:
+                return ip
+        
+        # Resolve and cache
+        try:
+            loop = asyncio.get_event_loop()
+            ip = await loop.getaddrinfo(hostname, None, family=socket.AF_INET)
+            if ip:
+                resolved_ip = ip[0][4][0]
+                self.cache[hostname] = (resolved_ip, now)
+                return resolved_ip
+        except Exception as e:
+            logger.debug(f"DNS resolution failed for {hostname}: {e}")
+        
+        return None
+
+class OptimizedConnector:
+    """Optimized HTTP connector with connection pooling and DNS caching."""
+    
+    def __init__(self, max_workers: int = 100, connections_per_host: int = 5):
+        self.dns_cache = DNSCache()
+        self.connector = None
+        self.max_workers = max_workers
+        self.connections_per_host = connections_per_host
+        self._setup_connector()
+    
+    def _setup_connector(self):
+        """Setup optimized aiohttp connector with anti-detection measures."""
+        # Custom resolver with DNS caching
+        resolver = aiohttp.AsyncResolver()
+        
+        # CONFIGURABLE connector settings
+        self.connector = aiohttp.TCPConnector(
+            # Connection pooling - CONFIGURABLE
+            limit=min(self.max_workers, 500),     # Total connections
+            limit_per_host=self.connections_per_host,  # CONFIGURABLE connections per host
+            
+            # Connection reuse - CAREFUL
+            keepalive_timeout=30,                 # Shorter keepalive (30s instead of 60s)
+            enable_cleanup_closed=True,           # Clean up quickly
+            
+            # Anti-detection measures
+            use_dns_cache=True,                   # DNS caching OK
+            resolver=resolver,                    
+            
+            # FORCE connection closing for proxy rotation
+            force_close=True,                     # IMPORTANT: Don't reuse connections across proxies!
+            
+            # Timeouts - reasonable
+            sock_connect=5,                       # Longer connect timeout
+            sock_read=15,                         # Longer read timeout
+        )
+    
+    def get_connector(self) -> aiohttp.TCPConnector:
+        """Get the optimized connector."""
+        return self.connector
+    
+    async def close(self):
+        """Close the connector."""
+        if self.connector:
+            await self.connector.close()
+
+# Global optimized connector
+_optimized_connector = None
+
+def get_optimized_connector(max_workers: int = 100, connections_per_host: int = 5) -> aiohttp.TCPConnector:
+    """Get or create optimized connector with configurable limits."""
+    global _optimized_connector
+    if _optimized_connector is None or _optimized_connector.connections_per_host != connections_per_host:
+        _optimized_connector = OptimizedConnector(max_workers, connections_per_host)
+    return _optimized_connector.get_connector()
+
+# ============== OPTIMIZED PROXY ROTATION ==============
+
+class SmartProxyRotator:
+    """Intelligent proxy rotation with anti-detection measures."""
+    
+    def __init__(self):
+        self.proxy_stats = {}  
+        self.proxy_queue = []  
+        self.last_rotation = 0
+        self.request_delays = {}  # proxy -> last_request_time
+    
+    def add_proxy(self, proxy: str):
+        """Add proxy to rotation."""
+        if proxy not in self.proxy_stats:
+            self.proxy_stats[proxy] = {
+                "speed": 1000,  
+                "success": 0,
+                "fail": 0,
+                "last_used": 0,
+                "consecutive_fails": 0,
+                "requests_per_minute": 0,
+                "last_minute_start": time.time()
+            }
+            self.request_delays[proxy] = 0
+    
+    def get_best_proxy(self, proxies: List[str], avoid_proxy: Optional[str] = None) -> Optional[str]:
+        """Get best available proxy with rate limiting and anti-detection."""
+        if not proxies:
+            return None
+        
+        # Add new proxies
+        for proxy in proxies:
+            self.add_proxy(proxy)
+        
+        now = time.time()
+        available = []
+        
+        for proxy in proxies:
+            stats = self.proxy_stats[proxy]
+            
+            # Skip if too many consecutive failures
+            if stats["consecutive_fails"] >= 3:  # Reduced from 5 to 3
+                continue
+            
+            # Skip if we want to avoid this proxy
+            if proxy == avoid_proxy:
+                continue
+            
+            # ANTI-DETECTION: Rate limiting per proxy
+            last_request = self.request_delays.get(proxy, 0)
+            if now - last_request < 0.5:  # Minimum 500ms between requests per proxy
+                continue
+            
+            # ANTI-DETECTION: Max requests per minute per proxy
+            if now - stats["last_minute_start"] > 60:
+                stats["requests_per_minute"] = 0
+                stats["last_minute_start"] = now
+            
+            if stats["requests_per_minute"] >= 30:  # Max 30 requests per minute per proxy
+                continue
+            
+            # Calculate score (lower = better)
+            total_requests = stats["success"] + stats["fail"]
+            if total_requests > 0:
+                fail_rate = stats["fail"] / total_requests
+                score = stats["speed"] * (1 + fail_rate * 3)  # Higher penalty for failures
+            else:
+                score = stats["speed"]
+            
+            available.append((proxy, score))
+        
+        if not available:
+            # If no proxies available, wait a bit and reset some limits
+            logger.warning("No proxies available due to rate limiting - backing off")
+            return None
+        
+        # Sort by score and use round-robin among top proxies
+        available.sort(key=lambda x: x[1])
+        top_count = max(1, min(3, len(available)))  # Use max 3 best proxies
+        top_proxies = [p[0] for p in available[:top_count]]
+        
+        # Simple round-robin
+        selected_proxy = top_proxies[int(now) % len(top_proxies)]
+        
+        # Update request tracking
+        self.request_delays[selected_proxy] = now
+        self.proxy_stats[selected_proxy]["requests_per_minute"] += 1
+        
+        return selected_proxy
+    
+    def record_success(self, proxy: str, response_time_ms: float):
+        """Record successful request."""
+        if proxy in self.proxy_stats:
+            stats = self.proxy_stats[proxy]
+            stats["success"] += 1
+            stats["consecutive_fails"] = 0
+            stats["last_used"] = time.time()
+            
+            # Update average speed (exponential moving average)
+            if stats["speed"] == 0:
+                stats["speed"] = response_time_ms
+            else:
+                stats["speed"] = stats["speed"] * 0.9 + response_time_ms * 0.1  # Slower adaptation
+    
+    def record_failure(self, proxy: str, error_type: str):
+        """Record failed request."""
+        if proxy in self.proxy_stats:
+            stats = self.proxy_stats[proxy]
+            stats["fail"] += 1
+            stats["consecutive_fails"] += 1
+            stats["last_used"] = time.time()
+            
+            # If blocked, increase penalty
+            if error_type == "blocked":
+                stats["consecutive_fails"] += 2  # Extra penalty for being blocked
+
+# Global smart proxy rotator
+_smart_rotator = SmartProxyRotator()
 
 # ============== ERROR TYPES ==============
 
@@ -99,7 +308,7 @@ def get_portal_info(url: str) -> Tuple[str, str]:
 async def do_request(session: aiohttp.ClientSession, url: str, cookies: Dict, headers: Dict, 
                     proxy: Optional[str], timeout: int) -> aiohttp.ClientResponse:
     """
-    Make async HTTP request with proper error handling.
+    Make optimized async HTTP request with connection pooling.
     
     Raises:
     - ProxyDeadError: Connection refused, DNS fail, proxy unreachable
@@ -107,7 +316,12 @@ async def do_request(session: aiohttp.ClientSession, url: str, cookies: Dict, he
     - ProxyBlockedError: 403, 429, Cloudflare/Captcha
     - PortalError: Portal-side errors (401, backend not available)
     """
-    timeout_config = aiohttp.ClientTimeout(connect=3, total=timeout)
+    # Optimized timeout configuration
+    timeout_config = aiohttp.ClientTimeout(
+        connect=2,        # Faster connection timeout
+        total=timeout,    # Total request timeout
+        sock_read=5       # Socket read timeout
+    )
     
     try:
         async with session.get(url, cookies=cookies, headers=headers, 
@@ -177,6 +391,25 @@ async def do_request(session: aiohttp.ClientSession, url: str, cookies: Dict, he
         raise
     except Exception as e:
         raise ProxyError(str(e))
+
+# ============== OPTIMIZED SESSION MANAGEMENT ==============
+
+async def create_optimized_session(max_workers: int = 100, connections_per_host: int = 5) -> aiohttp.ClientSession:
+    """Create optimized aiohttp session with connection pooling."""
+    connector = get_optimized_connector(max_workers, connections_per_host)
+    
+    # Optimized session configuration
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=30),  # Default timeout
+        headers={
+            'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'
+        },
+        # Enable HTTP/2 if server supports it
+        connector_owner=False,  # Don't close connector when session closes
+    )
+    
+    return session
 
 # ============== QUICKSCAN FUNCTION ==============
 

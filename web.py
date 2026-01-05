@@ -156,11 +156,9 @@ class AsyncScannerManager:
         mac_prefix = config["mac_prefix"]
         chunk_size = settings["chunk_size"]
         
-        # Setup session
-        connector = aiohttp.TCPConnector(limit=settings["max_workers"] * 2, limit_per_host=50)
-        timeout = aiohttp.ClientTimeout(total=settings["timeout"] + 10)
-        
-        self.session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+        # Setup optimized session with configurable limits
+        connections_per_host = settings.get("connections_per_host", 5)
+        self.session = await stb.create_optimized_session(settings["max_workers"], connections_per_host)
         
         try:
             add_log(state, f"🚀 Starting async scanner - Portal: {portal_url}", "info")

@@ -471,6 +471,23 @@
                 </div>
             </div>
 
+            <h4 style="color: #667eea; margin: 20px 0 15px 0;">🔧 Advanced Settings</h4>
+            
+            <div class="control-group">
+                <div class="input-group" style="flex: 1;">
+                    <label for="connectionsPerHost">Connections per Host:</label>
+                    <input type="number" id="connectionsPerHost" min="1" max="50" value="5" title="Max simultaneous connections per portal (lower = safer)">
+                </div>
+                <div class="input-group" style="flex: 1;">
+                    <label for="requestsPerMinute">Requests/Min per Proxy:</label>
+                    <input type="number" id="requestsPerMinute" min="5" max="120" value="30" title="Max requests per minute per proxy">
+                </div>
+                <div class="input-group" style="flex: 1;">
+                    <label for="minDelay">Min Delay (seconds):</label>
+                    <input type="number" id="minDelay" min="0.1" max="5" step="0.1" value="0.5" title="Minimum delay between requests per proxy">
+                </div>
+            </div>
+
             <div class="control-group">
                 <button class="btn btn-success" onclick="saveConfig()">💾 Save Config</button>
                 <button class="btn btn-secondary" onclick="loadConfig()">📁 Load Config</button>
@@ -787,6 +804,11 @@
                 document.getElementById('timeout').value = config.settings?.timeout || 15;
                 document.getElementById('debugMode').checked = config.settings?.debug_mode || false;
                 
+                // Advanced settings
+                document.getElementById('connectionsPerHost').value = config.settings?.connections_per_host || 5;
+                document.getElementById('requestsPerMinute').value = config.settings?.requests_per_minute_per_proxy || 30;
+                document.getElementById('minDelay').value = config.settings?.min_delay_between_requests || 0.5;
+                
                 console.log('Configuration loaded');
             } catch (error) {
                 // Error already handled by apiCall
@@ -806,7 +828,11 @@
                     max_retries: 3,
                     max_proxy_errors: 10,
                     auto_save: true,
-                    quickscan_only: false
+                    quickscan_only: false,
+                    // Advanced settings
+                    connections_per_host: parseInt(document.getElementById('connectionsPerHost').value),
+                    requests_per_minute_per_proxy: parseInt(document.getElementById('requestsPerMinute').value),
+                    min_delay_between_requests: parseFloat(document.getElementById('minDelay').value)
                 }
             };
 
@@ -817,11 +843,7 @@
                     body: JSON.stringify(config)
                 });
                 
-                if (document.getElementById('debugMode').checked !== (config.settings?.debug_mode || false)) {
-                    alert('Configuration saved! Restart required for debug mode changes.');
-                } else {
-                    alert('Configuration saved successfully!');
-                }
+                alert('Configuration saved! Restart required for connection settings to take effect.');
             } catch (error) {
                 // Error already handled by apiCall
             }

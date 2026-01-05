@@ -412,13 +412,16 @@ async def process_mac_chunk(session: aiohttp.ClientSession, config: Dict[str, An
             # Mark MAC as tested (even if it fails due to proxy issues)
             state["tested_macs"].add(mac)
             
-            # Get proxy
+            # Get proxy using SmartProxyRotator for better anti-detection
             proxy = None
             if proxies:
-                proxy = proxy_scorer.get_next_proxy(proxies, portal_url, settings["max_proxy_errors"])
+                proxy = stb._smart_rotator.get_best_proxy(proxies, state.get("current_proxy"))
                 if not proxy:
                     retry_queue.add_retry(mac, 0, None, "no_proxy")
                     return None
+                
+                # Update current proxy in state
+                state["current_proxy"] = proxy
             
             # Test MAC
             start_time = time.time()
@@ -436,6 +439,7 @@ async def process_mac_chunk(session: aiohttp.ClientSession, config: Dict[str, An
                 
                 if proxy:
                     proxy_scorer.record_success(proxy, elapsed_ms)
+                    stb._smart_rotator.record_success(proxy, elapsed_ms)
                 
                 # Process hit data
                 expiry = result.get("expiry", "Unknown")
@@ -493,6 +497,7 @@ async def process_mac_chunk(session: aiohttp.ClientSession, config: Dict[str, An
                 # Proxy error - retry with different proxy
                 if proxy:
                     proxy_scorer.record_fail(proxy, error_type, portal_url)
+                    stb._smart_rotator.record_failure(proxy, error_type)
                 
                 retry_queue.add_retry(mac, 0, proxy, error_type)
                 
@@ -527,11 +532,11 @@ async def run_scanner(config: Dict[str, Any], state: Dict[str, Any], mac_list: O
     proxy_scorer = ProxyScorer()
     retry_queue = RetryQueue(settings["max_retries"])
     
-    # Setup session
-    connector = aiohttp.TCPConnector(limit=settings["max_workers"] * 2, limit_per_host=50)
-    timeout = aiohttp.ClientTimeout(total=settings["timeout"] + 10)
+    # Setup optimized session with configurable limits
+    connections_per_host = settings.get("connections_per_host", 5)
+    session = await stb.create_optimized_session(settings["max_workers"], connections_per_host)
     
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+    try:
         add_log(state, f"🚀 Starting async scanner - Portal: {portal_url}", "info")
         
         if not state["session_stats"]["session_start"]:
@@ -623,6 +628,10 @@ async def run_scanner(config: Dict[str, Any], state: Dict[str, Any], mac_list: O
                 add_log(state, "📊 Proxy Statistics:", "info")
                 for proxy, stats in proxy_stats.items():
                     add_log(state, f"  {proxy}: {stats['success_rate']} success, {stats['avg_speed']} avg", "info")
+    
+    finally:
+        # Close the session
+        await session.close()
 
 # ============== CLI INTERFACE ==============
 
