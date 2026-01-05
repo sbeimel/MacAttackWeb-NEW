@@ -6,7 +6,7 @@ services:
     build: .
     container_name: macattack-web3
     ports:
-      - "5005:5005"
+      - "5004:5005"
     volumes:
       - ./data:/app/data
       - ./macs.txt:/app/data/macs.txt:ro
