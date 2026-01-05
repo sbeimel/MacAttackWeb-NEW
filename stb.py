@@ -22,7 +22,7 @@ logger = logging.getLogger("MacAttack.stb")
 # ============== PERFORMANCE OPTIMIZATIONS ==============
 
 class DNSCache:
-    """DNS resolution cache for faster lookups."""
+    """Simple DNS resolution cache for faster lookups."""
     
     def __init__(self, ttl: int = 300):  # 5 minutes TTL
         self.cache = {}
@@ -38,77 +38,16 @@ class DNSCache:
             if now - timestamp < self.ttl:
                 return ip
         
-        # Resolve and cache
+        # Resolve using standard library to avoid aiodns issues
         try:
-            loop = asyncio.get_event_loop()
-            # Use proper DNS resolution
-            result = await loop.getaddrinfo(hostname, None, family=socket.AF_INET)
-            if result:
-                resolved_ip = result[0][4][0]
-                self.cache[hostname] = (resolved_ip, now)
-                return resolved_ip
+            import socket
+            resolved_ip = socket.gethostbyname(hostname)
+            self.cache[hostname] = (resolved_ip, now)
+            return resolved_ip
         except Exception as e:
             logger.debug(f"DNS resolution failed for {hostname}: {e}")
         
         return None
-
-class OptimizedConnector:
-    """Optimized HTTP connector with connection pooling and DNS caching."""
-    
-    def __init__(self, max_workers: int = 100, connections_per_host: int = 5):
-        self.dns_cache = DNSCache()
-        self.connector = None
-        self.max_workers = max_workers
-        self.connections_per_host = connections_per_host
-        self._setup_connector()
-    
-    def _setup_connector(self):
-        """Setup optimized aiohttp connector with anti-detection measures."""
-        # Try to use custom resolver with DNS caching, fallback to default
-        resolver = None
-        try:
-            resolver = aiohttp.AsyncResolver()
-        except Exception:
-            # aiodns not available, use default resolver
-            resolver = None
-        
-        # CONFIGURABLE connector settings
-        self.connector = aiohttp.TCPConnector(
-            # Connection pooling - CONFIGURABLE
-            limit=min(self.max_workers, 500),     # Total connections
-            limit_per_host=self.connections_per_host,  # CONFIGURABLE connections per host
-            
-            # Anti-detection measures
-            use_dns_cache=True,                   # DNS caching OK
-            resolver=resolver,                    # Optional resolver
-            
-            # Connection management - fixed conflict
-            force_close=False,                    # Allow connection reuse for better performance
-            keepalive_timeout=30,                 # Connection keepalive (30s)
-            enable_cleanup_closed=True,           # Clean up closed connections
-            
-            # DNS cache TTL
-            ttl_dns_cache=300,                    # 5 minutes DNS cache
-        )
-    
-    def get_connector(self) -> aiohttp.TCPConnector:
-        """Get the optimized connector."""
-        return self.connector
-    
-    async def close(self):
-        """Close the connector."""
-        if self.connector:
-            await self.connector.close()
-
-# Global optimized connector
-_optimized_connector = None
-
-def get_optimized_connector(max_workers: int = 100, connections_per_host: int = 5) -> aiohttp.TCPConnector:
-    """Get or create optimized connector with configurable limits."""
-    global _optimized_connector
-    if _optimized_connector is None or _optimized_connector.connections_per_host != connections_per_host:
-        _optimized_connector = OptimizedConnector(max_workers, connections_per_host)
-    return _optimized_connector.get_connector()
 
 # ============== OPTIMIZED PROXY ROTATION ==============
 
@@ -399,7 +338,19 @@ async def do_request(session: aiohttp.ClientSession, url: str, cookies: Dict, he
 
 async def create_optimized_session(max_workers: int = 100, connections_per_host: int = 5) -> aiohttp.ClientSession:
     """Create optimized aiohttp session with connection pooling."""
-    connector = get_optimized_connector(max_workers, connections_per_host)
+    # Use simple TCPConnector without complex DNS resolver
+    connector = aiohttp.TCPConnector(
+        # Connection pooling
+        limit=min(max_workers, 500),
+        limit_per_host=connections_per_host,
+        
+        # Basic settings to avoid DNS issues
+        use_dns_cache=True,
+        force_close=False,
+        keepalive_timeout=30,
+        enable_cleanup_closed=True,
+        ttl_dns_cache=300,
+    )
     
     # Optimized session configuration
     session = aiohttp.ClientSession(
@@ -408,8 +359,7 @@ async def create_optimized_session(max_workers: int = 100, connections_per_host:
         headers={
             'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'
         },
-        # Enable HTTP/2 if server supports it
-        connector_owner=False,  # Don't close connector when session closes
+        connector_owner=True,  # Session owns the connector
     )
     
     return session
