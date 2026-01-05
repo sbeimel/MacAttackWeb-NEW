@@ -26,8 +26,16 @@ logger = logging.getLogger("MacAttack.app_async")
 
 # ============== CONFIGURATION ==============
 
-CONFIG_FILE = "config.json"
-STATE_FILE = "state.json"
+import os
+from pathlib import Path
+
+# Ensure data directory exists
+DATA_DIR = Path("/app/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+CONFIG_FILE = DATA_DIR / "macattack.json"
+STATE_FILE = DATA_DIR / "state.json"
+SECURITY_FILE = DATA_DIR / "security.json"
 
 DEFAULT_CONFIG = {
     "portal_url": "http://example.com/portal.php",
@@ -430,16 +438,21 @@ async def process_mac_chunk(session: aiohttp.ClientSession, config: Dict[str, An
             # Mark MAC as tested (even if it fails due to proxy issues)
             state["tested_macs"].add(mac)
             
-            # Get proxy using SmartProxyRotator for better anti-detection
+            # Get proxy if available
             proxy = None
-            if proxies:
+            if proxies and len(proxies) > 0:
                 proxy = stb._smart_rotator.get_best_proxy(proxies, state.get("current_proxy"))
                 if not proxy:
+                    # No suitable proxy available, but we have proxies configured
+                    # This means all proxies are blocked/failed - skip this MAC for now
                     retry_queue.add_retry(mac, 0, None, "no_proxy")
                     return None
                 
                 # Update current proxy in state
                 state["current_proxy"] = proxy
+            else:
+                # No proxies configured - use direct connection (this is OK!)
+                state["current_proxy"] = None
             
             # Test MAC
             start_time = time.time()
@@ -455,6 +468,7 @@ async def process_mac_chunk(session: aiohttp.ClientSession, config: Dict[str, An
                 state["hits"] += 1
                 state["session_stats"]["session_hits"] += 1
                 
+                # Update proxy statistics only if proxy was used
                 if proxy:
                     proxy_scorer.record_success(proxy, elapsed_ms)
                     stb._smart_rotator.record_success(proxy, elapsed_ms)
@@ -512,19 +526,33 @@ async def process_mac_chunk(session: aiohttp.ClientSession, config: Dict[str, An
                 return hit_data
             
             elif error_type:
-                # Proxy error - retry with different proxy
+                # Handle errors based on whether proxy is used
                 if proxy:
+                    # Proxy error - retry with different proxy
                     proxy_scorer.record_fail(proxy, error_type, portal_url)
                     stb._smart_rotator.record_failure(proxy, error_type)
-                
-                retry_queue.add_retry(mac, 0, proxy, error_type)
-                
-                if error_type == "dead":
-                    add_log(state, f"💀 Proxy dead: {proxy}", "error")
-                elif error_type == "blocked":
-                    add_log(state, f"🚫 Proxy blocked: {proxy}", "warning")
-                elif error_type == "slow":
-                    add_log(state, f"🐌 Proxy slow: {proxy}", "warning")
+                    
+                    retry_queue.add_retry(mac, 0, proxy, error_type)
+                    
+                    if error_type == "dead":
+                        add_log(state, f"💀 Proxy dead: {proxy}", "error")
+                    elif error_type == "blocked":
+                        add_log(state, f"🚫 Proxy blocked: {proxy}", "warning")
+                    elif error_type == "slow":
+                        add_log(state, f"🐌 Proxy slow: {proxy}", "warning")
+                else:
+                    # Direct connection error (no proxy)
+                    if error_type == "dead":
+                        add_log(state, f"💀 Connection failed: {mac}", "error")
+                    elif error_type == "blocked":
+                        add_log(state, f"🚫 Request blocked: {mac}", "warning")
+                    elif error_type == "slow":
+                        add_log(state, f"🐌 Request timeout: {mac}", "warning")
+                    
+                    # For direct connection, don't retry as aggressively
+                    # Only retry once for timeouts, not for dead/blocked
+                    if error_type == "slow":
+                        retry_queue.add_retry(mac, 0, None, error_type)
             
             return None
     

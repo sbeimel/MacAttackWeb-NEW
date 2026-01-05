@@ -38,7 +38,13 @@ app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours session timeout
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Security configuration
-SECURITY_FILE = "security.json"
+from pathlib import Path
+
+# Ensure data directory exists
+DATA_DIR = Path("/app/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+SECURITY_FILE = DATA_DIR / "security.json"
 
 def load_security():
     """Load security configuration."""
@@ -101,8 +107,13 @@ scanner_session = None
 mac_list = None
 
 # Load MAC list if available
-if Path("macs.txt").exists():
-    mac_list = load_mac_list("macs.txt")
+mac_list_path = DATA_DIR / "macs.txt"
+if mac_list_path.exists():
+    mac_list = load_mac_list(str(mac_list_path))
+else:
+    # Fallback to old location
+    if Path("macs.txt").exists():
+        mac_list = load_mac_list("macs.txt")
 
 # ============== ASYNC SCANNER INTEGRATION ==============
 
