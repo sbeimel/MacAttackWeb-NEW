@@ -4,7 +4,7 @@ version: '3.8'
 services:
   macattack:
     build: .
-    container_name: macattack-web
+    container_name: macattack-web3
     ports:
       - "5005:5005"
     volumes:
