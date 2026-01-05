@@ -63,8 +63,13 @@ class OptimizedConnector:
     
     def _setup_connector(self):
         """Setup optimized aiohttp connector with anti-detection measures."""
-        # Custom resolver with DNS caching
-        resolver = aiohttp.AsyncResolver()
+        # Try to use custom resolver with DNS caching, fallback to default
+        resolver = None
+        try:
+            resolver = aiohttp.AsyncResolver()
+        except Exception:
+            # aiodns not available, use default resolver
+            resolver = None
         
         # CONFIGURABLE connector settings
         self.connector = aiohttp.TCPConnector(
@@ -78,7 +83,7 @@ class OptimizedConnector:
             
             # Anti-detection measures
             use_dns_cache=True,                   # DNS caching OK
-            resolver=resolver,                    
+            resolver=resolver,                    # Optional resolver
             
             # FORCE connection closing for proxy rotation
             force_close=True,                     # IMPORTANT: Don't reuse connections across proxies!
