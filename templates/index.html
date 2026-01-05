@@ -836,7 +836,6 @@
                         name: 'Current Portal',
                         url: data.current_portal || 'Unknown'  // Use portal from data instead of form
                     },
-                    },
                     status: data.paused ? 'paused' : 'running',
                     stats: { 
                         tested: data.tested || 0, 
@@ -855,7 +854,7 @@
                     hits: data.hits || 0, 
                     errors: 0 
                 };
-                attack.portal.url = document.getElementById('attack-url').value || attack.portal.url;
+                attack.portal.url = data.current_portal || attack.portal.url;
             }
 
             if (!isRunning && runningAttacks.has('current_scanner')) {
