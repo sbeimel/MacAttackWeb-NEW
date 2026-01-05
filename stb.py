@@ -82,7 +82,7 @@ class OptimizedConnector:
             use_dns_cache=True,                   # DNS caching OK
             resolver=resolver,                    # Optional resolver
             
-            # Connection management - choose one approach
+            # Connection management - fixed conflict
             force_close=False,                    # Allow connection reuse for better performance
             keepalive_timeout=30,                 # Connection keepalive (30s)
             enable_cleanup_closed=True,           # Clean up closed connections
@@ -135,7 +135,7 @@ class SmartProxyRotator:
             }
             self.request_delays[proxy] = 0
     
-    def get_best_proxy(self, proxies: List[str], avoid_proxy: Optional[str] = None) -> Optional[str]:
+    def get_best_proxy(self, proxies: list, avoid_proxy: Optional[str] = None) -> Optional[str]:
         """Get best available proxy with rate limiting and anti-detection."""
         if not proxies:
             return None

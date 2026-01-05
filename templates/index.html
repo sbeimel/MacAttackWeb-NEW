@@ -752,23 +752,60 @@
             // Update current status
             document.getElementById('currentMac').textContent = data.current_mac || '-';
             document.getElementById('currentProxy').textContent = data.current_proxy || '-';
+            
+            // Update current portal display
+            if (data.current_portal) {
+                document.getElementById('current-portal').textContent = data.current_portal;
+            }
 
-            // Update status indicator
+            // Update status indicator and button states
             const statusIndicator = document.getElementById('statusIndicator');
             const statusText = document.getElementById('scannerStatus');
+            const startBtn = document.getElementById('btn-start');
+            const stopBtn = document.getElementById('btn-stop-all');
+            const pauseBtn = document.getElementById('btn-pause');
+            
+            // Update running status from server data
+            if (data.running !== undefined) {
+                isRunning = data.running;
+            }
             
             if (data.paused) {
                 statusIndicator.className = 'status-indicator status-paused';
                 statusText.textContent = 'Paused';
                 isPaused = true;
+                
+                // Button states for paused
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (pauseBtn) {
+                    pauseBtn.disabled = false;
+                    pauseBtn.textContent = '▶ Resume';
+                }
             } else if (isRunning) {
                 statusIndicator.className = 'status-indicator status-running';
                 statusText.textContent = 'Running';
                 isPaused = false;
+                
+                // Button states for running
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (pauseBtn) {
+                    pauseBtn.disabled = false;
+                    pauseBtn.textContent = '⏸ Pause';
+                }
             } else {
                 statusIndicator.className = 'status-indicator status-stopped';
                 statusText.textContent = 'Stopped';
                 isPaused = false;
+                
+                // Button states for stopped
+                if (startBtn) startBtn.disabled = false;
+                if (stopBtn) stopBtn.disabled = true;
+                if (pauseBtn) {
+                    pauseBtn.disabled = true;
+                    pauseBtn.textContent = '⏸ Pause';
+                }
             }
 
             // Update hits list
@@ -797,7 +834,8 @@
                     id: 'current_scanner',
                     portal: {
                         name: 'Current Portal',
-                        url: document.getElementById('attack-url').value || 'Unknown'
+                        url: data.current_portal || 'Unknown'  // Use portal from data instead of form
+                    },
                     },
                     status: data.paused ? 'paused' : 'running',
                     stats: { 
@@ -893,6 +931,15 @@
                 isRunning = true;
                 console.log('Scanner started');
                 showSuccessMessage('Scanner started successfully');
+                
+                // Update button states immediately
+                const startBtn = document.getElementById('btn-start');
+                const stopBtn = document.getElementById('btn-stop-all');
+                const pauseBtn = document.getElementById('btn-pause');
+                
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (pauseBtn) pauseBtn.disabled = false;
             } catch (error) {
                 // Error already handled by apiCall
             }
@@ -902,8 +949,21 @@
             try {
                 const result = await apiCall('/api/stop', { method: 'POST' });
                 isRunning = false;
+                isPaused = false;
                 console.log('Scanner stopped');
                 showSuccessMessage('Scanner stopped');
+                
+                // Update button states immediately
+                const startBtn = document.getElementById('btn-start');
+                const stopBtn = document.getElementById('btn-stop-all');
+                const pauseBtn = document.getElementById('btn-pause');
+                
+                if (startBtn) startBtn.disabled = false;
+                if (stopBtn) stopBtn.disabled = true;
+                if (pauseBtn) {
+                    pauseBtn.disabled = true;
+                    pauseBtn.textContent = '⏸ Pause';
+                }
             } catch (error) {
                 // Error already handled by apiCall
             }
@@ -915,6 +975,12 @@
                 isPaused = result.paused;
                 console.log('Scanner ' + (isPaused ? 'paused' : 'resumed'));
                 showSuccessMessage('Scanner ' + (isPaused ? 'paused' : 'resumed'));
+                
+                // Update button states immediately
+                const pauseBtn = document.getElementById('btn-pause');
+                if (pauseBtn) {
+                    pauseBtn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+                }
             } catch (error) {
                 // Error already handled by apiCall
             }

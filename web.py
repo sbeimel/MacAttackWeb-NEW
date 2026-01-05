@@ -11,6 +11,7 @@ import json
 import time
 import hashlib
 import secrets
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -27,6 +28,9 @@ from app import (
     ProxyScorer, RetryQueue, generate_mac, load_mac_list,
     process_mac_chunk, generate_unique_mac, estimate_mac_space
 )
+
+# Setup logging
+logger = logging.getLogger("MacAttack.web")
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = secrets.token_hex(32)  # Generate random secret key
@@ -176,7 +180,22 @@ class AsyncScannerManager:
             
             mac_index = state.get("mac_index", 0)
             
-            while not state["paused"] and self.running:
+            while not state.get("stop_requested", False) and self.running:
+                # Check for pause
+                if state["paused"]:
+                    add_log(state, "⏸️ Scanner paused", "warning")
+                    self._emit_update()
+                    
+                    # Wait while paused
+                    while state["paused"] and not state.get("stop_requested", False):
+                        await asyncio.sleep(1)
+                    
+                    if state.get("stop_requested", False):
+                        add_log(state, "⏹️ Scanner stop requested during pause", "warning")
+                        break
+                    else:
+                        add_log(state, "▶️ Scanner resumed", "info")
+                        self._emit_update()
                 # Prepare MAC chunk
                 mac_chunk = []
                 
@@ -247,8 +266,13 @@ class AsyncScannerManager:
                     save_config(config)
                     save_state(state)
                 
-                # Brief pause between chunks
-                await asyncio.sleep(0.1)
+                # Brief pause between chunks to allow pause/stop
+                await asyncio.sleep(0.5)  # Increased from 0.1 to 0.5 seconds
+                
+                # Check for stop request
+                if state.get("stop_requested", False):
+                    add_log(state, "⏹️ Scanner stop requested", "warning")
+                    break
         
         except Exception as e:
             add_log(state, f"❌ Scanner error: {e}", "error")
@@ -260,9 +284,12 @@ class AsyncScannerManager:
     
     async def _cleanup(self):
         """Cleanup resources."""
-        if self.session:
-            await self.session.close()
-            self.session = None
+        try:
+            if self.session and not self.session.closed:
+                await self.session.close()
+                self.session = None
+        except Exception as e:
+            logger.error(f"Error closing session: {e}")
         
         # Final save
         save_config(config)
@@ -284,7 +311,9 @@ class AsyncScannerManager:
                 "hits": state["hits"],
                 "current_mac": state.get("current_mac"),
                 "current_proxy": state.get("current_proxy"),
+                "current_portal": config.get("portal_url", "Unknown"),  # Add current portal
                 "paused": state["paused"],
+                "running": self.running,  # Add running status
                 "test_rate": f"{test_rate:.1f}/s",
                 "hit_rate": f"{hit_rate:.2f}%",
                 "found_macs": state["found_macs"][-10:],  # Last 10 hits
