@@ -369,6 +369,29 @@
         <!-- SETTINGS TAB -->
         <div id="settings" class="tab-content">
             <div class="panel">
+                <h2>💡 Recommended Settings for Less False Negatives</h2>
+                <div class="help-text">
+                    <strong>For Maximum Accuracy (Slower):</strong><br>
+                    • Speed: 10-15 threads | Max Proxy Errors: 8-10 | Proxy Rotation: 70% | Connect Timeout: 8s | Unlimited Retries: ON<br><br>
+                    
+                    <strong>For Balanced Performance:</strong><br>
+                    • Speed: 15-20 threads | Max Proxy Errors: 5-8 | Proxy Rotation: 50% | Connect Timeout: 5s | Max Proxy Attempts: 15<br><br>
+                    
+                    <strong>For Fast Scanning (Higher False Negatives):</strong><br>
+                    • Speed: 20-30 threads | Max Proxy Errors: 3-5 | Proxy Rotation: 30% | Connect Timeout: 3s | Max Proxy Attempts: 5<br><br>
+                    
+                    <strong>No Proxies (Direct Connection):</strong><br>
+                    • Speed: 5-10 threads | Read Timeout: 15-20s (portals can be slow)
+                </div>
+                <div class="button-group">
+                    <button id="btn-apply-max-accuracy" class="btn btn-success">Apply Max Accuracy</button>
+                    <button id="btn-apply-balanced" class="btn btn-primary">Apply Balanced</button>
+                    <button id="btn-apply-fast" class="btn btn-warning">Apply Fast Scan</button>
+                    <button id="btn-apply-no-proxy" class="btn btn-secondary">Apply No Proxy</button>
+                </div>
+            </div>
+
+            <div class="panel">
                 <h2>Attack Settings</h2>
                 <div class="form-row">
                     <div class="form-group">
@@ -376,8 +399,9 @@
                         <input type="number" id="setting-speed" min="1" max="100" value="10">
                     </div>
                     <div class="form-group">
-                        <label>Timeout (seconds):</label>
+                        <label>Read Timeout (seconds):</label>
                         <input type="number" id="setting-timeout" min="1" max="60" value="10">
+                        <small style="color: var(--text-secondary);">How long to wait for portal response after connection</small>
                     </div>
                     <div class="form-group">
                         <label>MAC Prefix:</label>
@@ -392,6 +416,26 @@
                     <div class="form-group checkbox-group">
                         <input type="checkbox" id="setting-auto-save" checked>
                         <label for="setting-auto-save">Auto-save found MACs</label>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="setting-require-channels" checked>
+                        <label for="setting-require-channels">Require Channels for Valid Hit</label>
+                        <small style="color: var(--text-secondary); display: block; margin-left: 25px;">Only count MACs as valid if they have channels (reduces false positives)</small>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="setting-compatible-mode">
+                        <label for="setting-compatible-mode">MacAttack.pyw Compatible Mode</label>
+                        <small style="color: var(--text-secondary); display: block; margin-left: 25px;">
+                            ON: Like MacAttack.pyw - no token = MAC invalid (no proxy retry)<br>
+                            OFF: Intelligent mode - analyze response to decide retry vs invalid
+                        </small>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Channels for Valid Hit:</label>
+                        <input type="number" id="setting-min-channels" min="0" max="1000" value="1">
+                        <small style="color: var(--text-secondary);">Minimum number of channels required for a valid MAC</small>
                     </div>
                 </div>
                 <button id="btn-save-settings" class="btn btn-success">Save Settings</button>
@@ -408,24 +452,38 @@
                     <div class="form-group">
                         <label>Max Proxy Errors:</label>
                         <input type="number" id="setting-max-proxy-errors" min="1" max="20" value="3">
-                        <small style="color: var(--text-secondary);">Disable proxy after this many errors</small>
+                        <small style="color: var(--text-secondary);">Disable proxy after this many consecutive errors</small>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Proxy Rotation %:</label>
+                        <input type="number" id="setting-proxy-rotation" min="10" max="100" value="50">
+                        <small style="color: var(--text-secondary);">Percentage of best proxies to use in rotation</small>
                     </div>
                     <div class="form-group">
-                        <label>Connections per Proxy:</label>
-                        <input type="number" id="setting-proxy-connections" min="1" max="50" value="5">
-                        <small style="color: var(--text-secondary);">Max concurrent connections per proxy per portal</small>
+                        <label>Connect Timeout (seconds):</label>
+                        <input type="number" id="setting-connect-timeout" min="1" max="30" value="5">
+                        <small style="color: var(--text-secondary);">Timeout for initial proxy connection</small>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Max Proxy Attempts per MAC:</label>
+                        <input type="number" id="setting-max-proxy-attempts" min="1" max="100" value="10">
+                        <small style="color: var(--text-secondary);">Maximum number of different proxies to try per MAC (overrides other settings)</small>
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group checkbox-group">
                         <input type="checkbox" id="setting-unlimited-retries">
-                        <label for="setting-unlimited-retries">Unlimited MAC Retries</label>
-                        <small style="color: var(--text-secondary); display: block; margin-left: 25px;">Retry MAC until a proxy works or all proxies are exhausted</small>
+                        <label for="setting-unlimited-retries">Unlimited Proxy Retries per MAC</label>
+                        <small style="color: var(--text-secondary); display: block; margin-left: 25px;">Try MAC with ALL available proxies until one works or all are exhausted</small>
                     </div>
                     <div class="form-group" id="max-retries-group">
-                        <label>Max MAC Retries:</label>
+                        <label>Max Proxies per MAC (Legacy):</label>
                         <input type="number" id="setting-max-mac-retries" min="1" max="50" value="3">
-                        <small style="color: var(--text-secondary);">Only used when "Unlimited" is off</small>
+                        <small style="color: var(--text-secondary);">Legacy setting - use "Max Proxy Attempts" above instead</small>
                     </div>
                 </div>
                 <button id="btn-save-proxy-settings" class="btn btn-success">Save Proxy Settings</button>

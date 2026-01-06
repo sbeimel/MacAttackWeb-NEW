@@ -937,7 +937,10 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
         timeout: parseInt(document.getElementById('setting-timeout').value),
         mac_prefix: document.getElementById('setting-prefix').value,
         use_proxies: document.getElementById('setting-use-proxies').checked,
-        auto_save: document.getElementById('setting-auto-save').checked
+        auto_save: document.getElementById('setting-auto-save').checked,
+        require_channels_for_valid_hit: document.getElementById('setting-require-channels').checked,
+        min_channels_for_valid_hit: parseInt(document.getElementById('setting-min-channels').value),
+        macattack_compatible_mode: document.getElementById('setting-compatible-mode').checked
     };
     await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
     alert('Settings saved!');
@@ -949,7 +952,9 @@ document.getElementById('btn-save-proxy-settings').addEventListener('click', asy
         max_proxy_errors: parseInt(document.getElementById('setting-max-proxy-errors').value),
         unlimited_mac_retries: document.getElementById('setting-unlimited-retries').checked,
         max_mac_retries: parseInt(document.getElementById('setting-max-mac-retries').value),
-        proxy_connections_per_portal: parseInt(document.getElementById('setting-proxy-connections').value)
+        proxy_rotation_percentage: parseInt(document.getElementById('setting-proxy-rotation').value),
+        proxy_connect_timeout: parseInt(document.getElementById('setting-connect-timeout').value),
+        max_proxy_attempts_per_mac: parseInt(document.getElementById('setting-max-proxy-attempts').value)
     };
     await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
     alert('Proxy settings saved!');
@@ -968,12 +973,17 @@ document.getElementById('setting-unlimited-retries').addEventListener('change', 
     document.getElementById('setting-prefix').value = s.mac_prefix || '00:1A:79:';
     document.getElementById('setting-use-proxies').checked = s.use_proxies || false;
     document.getElementById('setting-auto-save').checked = s.auto_save !== false;
+    document.getElementById('setting-require-channels').checked = s.require_channels_for_valid_hit !== false;
+    document.getElementById('setting-min-channels').value = s.min_channels_for_valid_hit || 1;
+    document.getElementById('setting-compatible-mode').checked = s.macattack_compatible_mode || false;
     document.getElementById('setting-proxy-test-threads').value = s.proxy_test_threads || 50;
     document.getElementById('setting-max-proxy-errors').value = s.max_proxy_errors || 3;
     document.getElementById('setting-unlimited-retries').checked = s.unlimited_mac_retries !== false;
     document.getElementById('setting-max-mac-retries').value = s.max_mac_retries || 3;
     document.getElementById('setting-max-mac-retries').disabled = s.unlimited_mac_retries !== false;
-    document.getElementById('setting-proxy-connections').value = s.proxy_connections_per_portal || 5;
+    document.getElementById('setting-proxy-rotation').value = s.proxy_rotation_percentage || 50;
+    document.getElementById('setting-connect-timeout').value = s.proxy_connect_timeout || 5;
+    document.getElementById('setting-max-proxy-attempts').value = s.max_proxy_attempts_per_mac || 10;
 })();
 
 
@@ -1046,3 +1056,46 @@ document.getElementById('btn-disable-auth').addEventListener('click', async () =
 });
 
 loadAuthStatus();
+// ============== PRESET SETTINGS ==============
+
+document.getElementById('btn-apply-max-accuracy').addEventListener('click', () => {
+    document.getElementById('setting-speed').value = 12;
+    document.getElementById('setting-timeout').value = 15;
+    document.getElementById('setting-max-proxy-errors').value = 10;
+    document.getElementById('setting-proxy-rotation').value = 70;
+    document.getElementById('setting-connect-timeout').value = 8;
+    document.getElementById('setting-unlimited-retries').checked = true;
+    document.getElementById('setting-max-mac-retries').disabled = true;
+    alert('✅ Max Accuracy settings applied! Don\'t forget to save.');
+});
+
+document.getElementById('btn-apply-balanced').addEventListener('click', () => {
+    document.getElementById('setting-speed').value = 18;
+    document.getElementById('setting-timeout').value = 12;
+    document.getElementById('setting-max-proxy-errors').value = 6;
+    document.getElementById('setting-proxy-rotation').value = 50;
+    document.getElementById('setting-connect-timeout').value = 5;
+    document.getElementById('setting-unlimited-retries').checked = false;
+    document.getElementById('setting-max-mac-retries').disabled = false;
+    document.getElementById('setting-max-proxy-attempts').value = 15;
+    alert('⚖️ Balanced settings applied! Don\'t forget to save.');
+});
+
+document.getElementById('btn-apply-fast').addEventListener('click', () => {
+    document.getElementById('setting-speed').value = 25;
+    document.getElementById('setting-timeout').value = 8;
+    document.getElementById('setting-max-proxy-errors').value = 4;
+    document.getElementById('setting-proxy-rotation').value = 30;
+    document.getElementById('setting-connect-timeout').value = 3;
+    document.getElementById('setting-unlimited-retries').checked = false;
+    document.getElementById('setting-max-mac-retries').disabled = false;
+    document.getElementById('setting-max-proxy-attempts').value = 5;
+    alert('🚀 Fast Scan settings applied! Don\'t forget to save.');
+});
+
+document.getElementById('btn-apply-no-proxy').addEventListener('click', () => {
+    document.getElementById('setting-speed').value = 8;
+    document.getElementById('setting-timeout').value = 20;
+    document.getElementById('setting-use-proxies').checked = false;
+    alert('🔗 No Proxy settings applied! Don\'t forget to save.');
+});
