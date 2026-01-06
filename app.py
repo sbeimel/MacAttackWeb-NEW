@@ -25,10 +25,13 @@ import stb
 
 VERSION = "2.0.0"
 
-# Logging - only errors
-logging.basicConfig(level=logging.WARNING)
+# Logging - optimized for production
+logging.basicConfig(level=logging.ERROR)  # Only errors in console
 logger = logging.getLogger("MacAttack")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)  # Reduce log verbosity
+
+# Disable waitress warnings in production
+logging.getLogger('waitress.queue').setLevel(logging.ERROR)
 
 if os.getenv("CONFIG"):
     configFile = os.getenv("CONFIG")
@@ -1412,4 +1415,15 @@ if __name__ == "__main__":
     bind_host = parts[0]
     bind_port = int(parts[1]) if len(parts) > 1 else 5004
     
-    waitress.serve(app, host=bind_host, port=bind_port)
+    # Optimized Waitress configuration for high-load scenarios
+    waitress.serve(
+        app, 
+        host=bind_host, 
+        port=bind_port,
+        threads=8,              # Increase thread pool
+        connection_limit=1000,  # More concurrent connections
+        cleanup_interval=10,    # Faster cleanup
+        channel_timeout=60,     # Longer timeout for slow requests
+        max_request_body_size=1073741824,  # 1GB for large file uploads
+        asyncore_use_poll=True  # Better performance on Linux
+    )

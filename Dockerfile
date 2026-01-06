@@ -6,6 +6,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -20,9 +21,11 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p /app/data /app/logs
 
-# Set environment variables
+# Set environment variables for better performance
 ENV CONFIG=/app/data/macattack.json
 ENV HOST=0.0.0.0:5004
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # Expose port
 EXPOSE 5004
