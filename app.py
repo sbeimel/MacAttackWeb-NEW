@@ -1029,7 +1029,6 @@ def run_attack(portal_id):
                         should_retry = new_retry_count < max_attempts
                     
                     if should_retry:
-                    if should_retry:
                         retry_queue.append((mac, new_retry_count, proxy))
                         if new_retry_count <= 3:  # Only log first few attempts to avoid spam
                             add_log(state, f"🔄 Retry {new_retry_count}: {mac} (worker error)", "warning")
